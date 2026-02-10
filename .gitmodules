@@ -1,0 +1,6 @@
+[submodule "SQLiteCpp"]
+	path = SQLiteCpp
+	url = https://github.com/SRombauts/SQLiteCpp.git
+[submodule "cmake/session-deps"]
+	path = cmake/session-deps
+	url = https://github.com/session-foundation/session-deps.git
