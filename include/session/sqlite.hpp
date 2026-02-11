@@ -5,6 +5,7 @@
 
 #include <concepts>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <span>
