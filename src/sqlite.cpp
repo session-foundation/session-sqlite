@@ -178,8 +178,9 @@ Database::Database(
             //
             // (For raw key mode, we don't have to do this as the salt is simply appended to the key
             // value we pass in).
-            _pragma_salt.emplace(fmt::format(
-                    "PRAGMA cipher_salt = \"x'{}'\"", oxenc::to_hex(salt->begin(), salt->end())));
+            _pragma_salt.emplace(
+                    "PRAGMA cipher_salt = \"x'" + oxenc::to_hex(salt->begin(), salt->end()) +
+                    "'\"");
     }
 
     // Get an initial connection so that we are testing that we can connect here in the constructor.
@@ -251,7 +252,7 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
                                                nullptr,
                                                nullptr,
                                                &errmsg)) {
-            auto err = fmt::format("Failed to {}: {}", failing_thing, errmsg);
+            auto err = "Failed to "s + failing_thing + ": "s + errmsg;
             sqlite3_free(errmsg);
             throw std::runtime_error{std::move(err)};
         }
@@ -299,8 +300,7 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
     if (name) {
         int cipher_idx = sqlite3mc_cipher_index(name);
         if (cipher_idx == -1)
-            throw std::runtime_error{
-                    fmt::format("Current SQLite-MC build does not support cipher '{}'", name)};
+            throw std::runtime_error{"Current SQLite-MC build does not support cipher: "s + name};
         if (-1 == sqlite3mc_config(sql.getHandle(), "cipher", cipher_idx))
             throw std::runtime_error{"Cipher selection failed"};
         if (legacy >= 0)
@@ -314,10 +314,9 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
 
     if (_plaintext_header)
         connect_pragma(
-                fmt::format(
-                        "PRAGMA plaintext_header_size = {}",
-                        (_enc == Encryption::SQLCipher3 || _enc == Encryption::SQLCipher4) ? 32
-                                                                                           : 24),
+                (_enc == Encryption::SQLCipher3 || _enc == Encryption::SQLCipher4)  // (formatting)
+                        ? "PRAGMA plaintext_header_size = 32"
+                        : "PRAGMA plaintext_header_size = 24",
                 "enable plaintext header mode");
 
     if (_pragma_salt)
@@ -346,8 +345,7 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
                     "Foreign key enabling query succeeded, but foreign keys were not actually "
                     "enabled!"};
     } catch (const std::exception& e) {
-        throw std::runtime_error{
-                fmt::format("Failed to enable foreign key integrity: {}", e.what())};
+        throw std::runtime_error{"Failed to enable foreign key integrity: "s + e.what()};
     }
 
     _conn_in_use.emplace_back(tid, conn);
