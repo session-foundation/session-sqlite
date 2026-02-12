@@ -331,38 +331,72 @@ bool enabled(Encryption type);
 //
 // These options can be passed in any order after the Encryption type.
 
-/// Argument value to pass to the Database constructor to signal that the database is in Apple iOS
-/// special snowflake mode that avoids encrypting the first 24/32 bytes of a file so that Apple can
-/// apply different rules to the process because files that look SQLite database get special
-/// handling because this is the sort of bullshit OS-level hacks that Apple thinks makes for good
-/// software design.
+/// `plaintext_header` is an argument value to pass to the Database constructor to create the
+/// database in Apple iOS special snowflake mode that avoids encrypting the first 24/32 bytes of a
+/// file so that Apple can apply different rules to the process (such as not immediately killing it)
+/// because files that look SQLite database get special handling because this is the sort of
+/// bullshit OS-level hacks that Apple thinks makes for good software design.
 ///
-/// Using this requires a 16-byte database salt span to be provided (because the salt otherwise
-/// would go into the first 16 bytes of the file, but Apple snowflake mode requires an unencrypted
-/// SQLite3 16-byte magic string there instead).
+/// If you are using a raw key (as opposed to a user-supplied password) with one of the preferred
+/// ciphers (AEGIS, ChaCha20, or Ascon128) then all you need to pass is this value.  If you are
+/// using a password (either plaintext or wrapped with argon2_password) then you must also specify
+/// and store a salt yourself, and must pass it every time you open the database with the
+/// `salt{...}` option.
 ///
-/// If you are also using raw 32-byte keys (rather than plaintext passwords) then it is perfectly
-/// acceptable for this salt to be a fixed constant (so that it does not have to be separately
-/// stored) as the salt adds no cryptographic security at all when already using a secure random
-/// 32-byte key.  (The main purpose of the salt is for plaintext password hashing, although it does,
-/// somewhat pointlessly, also get used when expanding raw keys).
+/// For AEGIS, ChaCha20, and Ascon128 with raw keys, the salt is not used at all in plaintext
+/// password mode, and is not needed to decrypt the database.
+///
+/// SQLCipher3/4 always requires a salt, and so even in raw key mode you must provide it when using
+/// plaintext header mode.  (This is because SQLCipher does a completely pointless extra salted hash
+/// round even when you use a raw key, which adds no security whatsoever but probably ticked a
+/// security theatre checkbox somewhere that made one of their corporate customers pay^Whappy).
+///
+/// Because this salt does nothing (cryptographically), it is perfectly acceptable (and, in fact,
+/// recommended) to use a fixed salt value with SQLCipher + raw keys so that the salt doesn't have
+/// to be stored separately at all.  (Of course, if you are loading an existing, plaintext header
+/// SQLCipher encrypted database, then you have to pass whatever the salt value it was created
+/// with).
 ///
 /// Depending on the encryption algorithm in use this will leave either the first 24 (everything
 /// except SQLCipher3/4) or 32 (SQLCipher3/4) bytes of the file unencrypted.  (Only the first 24
-/// need to be unencrypted, but SQLCipher's AES-CBC requires a multiple of the 16-byte block size).
+/// need to be unencrypted to activate iOS special snowflake mode, but SQLCipher's AES-CBC block
+/// encryption mode requires that the value is a multiple of the 16-byte encryption block size).
 ///
-/// This slightly leaks some metadata -- you can tell it's an encrypted SQLite file and, with
-/// SQLCipher, it also leaks the file change counter (which lives in bytes 24-27).  (Bytes 28-31 are
-/// the page size, which doesn't seem like much of a leak since you can figure this out from the
-/// file size).
-///
-/// If you are constructing a new database and using a plaintext password for encryption then
-/// generate a secure random salt and pass it here.
+/// Using this leaks a tiny amount of metadata -- you can tell it's an encrypted SQLite file and,
+/// with SQLCipher, it also leaks the file change counter (which lives in bytes 24-27).  (Bytes
+/// 28-31 are the page count, which doesn't seem like much of a leak since you can figure this out
+/// from the file size already).
 ///
 /// If you are *not* using a plaintext header then you don't need to worry about the salt at all
 /// (and thus there is no interface to pass it otherwise): it will be automatically read/stored from
 /// the first 16 bytes of the file.
-struct plaintext_header {
+struct plaintext_header_t {};
+inline constexpr plaintext_header_t plaintext_header;
+
+/// Specifies a 16-byte database salt.  There are two main use cases for this:
+/// - When using `plaintext_header` with a plaintext password: the salt is not stored in the
+///   database and so must be stored by the application and provided each time the database is
+///   opened.  (If not using plaintext_header, the salt is available as the first 16 bytes of the
+///   database file).
+/// - With SQLCipher with `plaintext_header`: even when using raw key, SQLCipher still requires the
+///   salt to decrypt the database.  (AEGIS/ChaCha20/Ascon128 do not).
+///
+/// And one silly case:
+/// - AEGIS/ChaCha20/Ascon128 vanity header (when using raw keys).  If, for some reason, you want to
+///   control the first 16 bytes of the file then simply specify your desired 16-byte vanity prefix
+///   when you first create it; it will get stored as the salt value at the beginning of the file,
+///   but will never actually affect encryption when using raw keys.  DO NOT DO THIS with plaintext
+///   password -- the security of the database with a plaintext password depends on using a random
+///   salt!
+///
+/// If you are creating a new database and fit into one of the cases above, then:
+/// - If you are using SQLCipher3/4 with a raw key, just use a fixed 16-byte salt, e.g. your
+///   application name.
+/// - If you are using a plaintext password, generate a random salt, for instance with sodium's
+///   randombytes_buf.
+/// - If you are making a vanity salt with AEGIS/ChaCha20/Ascon128 (and using raw keys) then have
+///   fun.
+struct salt {
     std::span<const std::byte, 16> salt;
 };
 
@@ -542,7 +576,8 @@ namespace detail {
 }  // namespace detail
 
 template <typename T>
-concept DatabaseEncryptOption = detail::any_of<T, plaintext_header, raw_key, plaintext_password>;
+concept DatabaseEncryptOption =
+        detail::any_of<T, plaintext_header_t, salt, raw_key, argon2id_password, plaintext_password>;
 
 template <typename T>
 concept DatabaseBehaviourOption =
@@ -674,7 +709,8 @@ class Database {
             std::optional<plaintext_password> plaintext_pass,
             std::optional<raw_key> raw_key,
             std::optional<argon2id_password> argon2id_pass,
-            std::optional<plaintext_header> plaintext_header_salt,
+            std::optional<plaintext_header_t> plaintext_header,
+            std::optional<salt> salt,
             std::optional<busy_timeout> busy_timeout,
             std::optional<wal_mode> wal_mode,
             std::optional<open_create> create,
@@ -697,7 +733,8 @@ class Database {
                     _maybe_instance<plaintext_password>(opts...),
                     _maybe_instance<raw_key>(opts...),
                     _maybe_instance<argon2id_password>(opts...),
-                    _maybe_instance<plaintext_header>(opts...),
+                    _maybe_instance<plaintext_header_t>(opts...),
+                    _maybe_instance<salt>(opts...),
                     _maybe_instance<busy_timeout>(opts...),
                     _maybe_instance<wal_mode>(opts...),
                     _maybe_instance<open_create>(opts...),
@@ -808,6 +845,8 @@ template <typename... T>
 class IterableStatementWrapper : StatementWrapper {
   public:
     using StatementWrapper::StatementWrapper;
+
+    IterableStatementWrapper(StatementWrapper&& s) : StatementWrapper{std::move(s)} {}
 
     class iterator {
         IterableStatementWrapper& sw;

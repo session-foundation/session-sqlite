@@ -9,7 +9,7 @@
 namespace session {
 
 secure_buffer::secure_buffer() {
-    if (sodium_init() != 0)
+    if (sodium_init() == -1)
         throw std::runtime_error{"libsodium initialization failed"};
 }
 

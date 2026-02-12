@@ -23,8 +23,8 @@
 
 namespace session::sqlite {
 
-static void sodium_init() {
-    if (0 != ::sodium_init())
+static void sodium_initialize() {
+    if (sodium_init() == -1)
         throw std::runtime_error{"Sodium init failed"};
 }
 
@@ -58,7 +58,8 @@ Database::Database(
         std::optional<plaintext_password> plaintext_pass,
         std::optional<raw_key> raw_key,
         std::optional<argon2id_password> argon2id_pass,
-        std::optional<plaintext_header> plaintext_header_salt,
+        std::optional<plaintext_header_t> plain_hdr,
+        std::optional<salt> pw_salt,
         std::optional<busy_timeout> busy_t_o,
         std::optional<wal_mode> wal_mode,
         std::optional<open_create> create,
@@ -68,15 +69,29 @@ Database::Database(
     if (!enabled(_enc))
         throw std::runtime_error{
                 "Database: this build does not support the selected encryption type"};
-    if (_enc == Encryption::None &&
-        (raw_key || plaintext_pass || argon2id_pass || plaintext_header_salt))
-        throw std::invalid_argument{
-                "Database: cannot use Encryption::None with database encryption options"};
+    if (_enc == Encryption::None) {
+        if (raw_key || plaintext_pass || argon2id_pass || plain_hdr || pw_salt)
+            throw std::invalid_argument{
+                    "Database: cannot use Encryption::None with database encryption options"};
+    } else {
+        if (!(raw_key || plaintext_pass || argon2id_pass))
+            throw std::invalid_argument{
+                    "Database: opening an encrypted database requires one of "
+                    "raw_key/plaintext_password/argon2id_password"};
 
-    if (_enc != Encryption::None && !(raw_key || plaintext_pass || argon2id_pass))
-        throw std::invalid_argument{
-                "Database: opening an encrypted database requires one of "
-                "raw_key/plaintext_password/argon2id_password"};
+        if (plain_hdr && !pw_salt) {
+            if (!raw_key)
+                throw std::invalid_argument{
+                        "Database: opening an encrypted database with a password in plaintext "
+                        "header mode requires a salt argument"};
+
+            if ((_enc == Encryption::SQLCipher3 || _enc == Encryption::SQLCipher4))
+                throw std::invalid_argument{
+                        "Database: opening an sqlcipher-encrypted file in plaintext header mode "
+                        "requires a "
+                        "salt argument (even in raw_key mode)"};
+        }
+    }
 
     // If you have *explicitly* given create=true and readonly=true then that is a
     // error.  If you've only given readonly but omitted create then we imply create is
@@ -97,26 +112,27 @@ Database::Database(
 
     std::optional<std::array<std::byte, 16>> salt;
 
-    if (plaintext_header_salt) {
+    if (plain_hdr) {
         _plaintext_header = true;
         if (_enc == Encryption::SQLCipher3)
-            throw std::invalid_argument{"SQLCipher3 and plaintext_header_salt are incompatible"};
-        salt.emplace();
-        std::memcpy(salt->data(), plaintext_header_salt->salt.data(), salt->size());
+            throw std::invalid_argument{"SQLCipher3 and plaintext_header are incompatible"};
+        if (pw_salt) {
+            salt.emplace();
+            std::memcpy(salt->data(), pw_salt->salt.data(), pw_salt->salt.size());
+        }
     }
 
     auto store_raw_key = [&](std::span<const std::byte, 32> key) {
-        // We have to pass this to sqlcipher or sqlite-mc as "x'...'" where ... is hex; there is no
-        // interface provided to pass a key as raw bytes.  This is dumb, of course, because it
-        // requires pointless hex/unhex on each side *and* because if someone actually tried to use
-        // x'hexstring' as a password, well, tough luck.
-        auto rw = _key.resize(67 + (salt ? 32 : 0));
+        // We have to pass this to sqlcipher or sqlite-mc as "x'...'" where ... is hex; sqlite-mc
+        // would allow us to pass bytes via `raw:BYTES` but we just use the x'...' there too to only
+        // have one codepath.
+        //
+        // In theory we can include the salt here on the end, but that hits sqlite3-mc issue #226,
+        // so we send the salt via PRAGMA instead to work around that.
+        auto rw = _key.resize(67);
         rw.buf[0] = std::byte{'x'};
         rw.buf[1] = std::byte{'\''};
         oxenc::to_hex(key.begin(), key.end(), reinterpret_cast<char*>(rw.buf.data() + 2));
-        if (salt)
-            oxenc::to_hex(
-                    salt->begin(), salt->end(), reinterpret_cast<char*>(rw.buf.data() + 2 + 64));
         rw.buf.back() = std::byte{'\''};
     };
 
@@ -165,23 +181,16 @@ Database::Database(
         // PBKDF2 on every new connection.
         //
         // But really you should just switch to argon2 instead because PBKDF2 doesn't offer much
-        // practical protection.
+        // practical modern protection.
 
         _key.update(std::span{
                 reinterpret_cast<const std::byte*>(plaintext_pass->pass.data()),
                 plaintext_pass->pass.size()});
-
-        if (salt)
-            // If we have a salt (via plaintext header) then we have to pass it via pragma after
-            // setting the key but before accessing anything (because in plaintext mode sqlite
-            // cannot store the salt itself).
-            //
-            // (For raw key mode, we don't have to do this as the salt is simply appended to the key
-            // value we pass in).
-            _pragma_salt.emplace(
-                    "PRAGMA cipher_salt = \"x'" + oxenc::to_hex(salt->begin(), salt->end()) +
-                    "'\"");
     }
+
+    if (salt)
+        _pragma_salt.emplace(
+                "PRAGMA cipher_salt = '" + oxenc::to_hex(salt->begin(), salt->end()) + "'");
 
     // Get an initial connection so that we are testing that we can connect here in the constructor.
     // We immediately drop it, which returns that single connection to the idle conns pool to be
@@ -246,12 +255,8 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
     auto& sql = conn->sql;
 
     auto connect_pragma = [&](const std::string& pragma, const char* failing_thing) {
-        if (char* errmsg; SQLITE_OK != sqlite3_exec(
-                                               sql.getHandle(),
-                                               "PRAGMA cipher_compatibility = 3",
-                                               nullptr,
-                                               nullptr,
-                                               &errmsg)) {
+        if (char* errmsg;
+            SQLITE_OK != sqlite3_exec(sql.getHandle(), pragma.c_str(), nullptr, nullptr, &errmsg)) {
             auto err = "Failed to "s + failing_thing + ": "s + errmsg;
             sqlite3_free(errmsg);
             throw std::runtime_error{std::move(err)};
@@ -260,11 +265,6 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
 
     connect_pragma(
             "PRAGMA trusted_schema = OFF", "disable horrible default trusted_schema setting");
-
-    if (_enc != Encryption::None) {
-        auto ro = _key.access();
-        sqlite3_key(sql.getHandle(), ro.buf.data(), ro.buf.size());
-    }
 
 #ifdef SESSION_SQLITE_SQLCIPHER
     // SQLCipher
@@ -314,13 +314,17 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
 
     if (_plaintext_header)
         connect_pragma(
-                (_enc == Encryption::SQLCipher3 || _enc == Encryption::SQLCipher4)  // (formatting)
-                        ? "PRAGMA plaintext_header_size = 32"
-                        : "PRAGMA plaintext_header_size = 24",
+                _enc == Encryption::SQLCipher4 ? "PRAGMA plaintext_header_size = 32"
+                                               : "PRAGMA plaintext_header_size = 24",
                 "enable plaintext header mode");
 
     if (_pragma_salt)
         connect_pragma(*_pragma_salt, "set cipher salt");
+
+    if (_enc != Encryption::None) {
+        auto ro = _key.access();
+        sqlite3_key(sql.getHandle(), ro.buf.data(), ro.buf.size());
+    }
 
     // Now make sure we can query something: this is our failure point (via exception) if the
     // authentication key is incorrect as this will be the first place that an actual read happens.
@@ -385,7 +389,7 @@ StatementWrapper::~StatementWrapper() {
 }
 
 void argon2id_password::compute(std::span<std::byte, 32> out, std::span<const std::byte, 16> salt) {
-    sodium_init();
+    sodium_initialize();
 
     if (0 != crypto_pwhash(
                      reinterpret_cast<unsigned char*>(out.data()),
@@ -401,7 +405,7 @@ void argon2id_password::compute(std::span<std::byte, 32> out, std::span<const st
 }
 
 std::array<std::byte, 16> argon2id_password::compute(std::span<std::byte, 32> out) {
-    sodium_init();
+    sodium_initialize();
     std::array<std::byte, 16> salt;
     randombytes_buf(salt.data(), salt.size());
     compute(out, salt);
