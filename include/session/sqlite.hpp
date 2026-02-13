@@ -952,9 +952,25 @@ class Connection {
         return exec_and_maybe_get<T...>(prepared_st(query), bind...);
     }
 
-    // Destroying this connection object drops its lease on the underlying connection and, if this
-    // is the last lease (i.e. the object has not been copied) the connection is returned to the
-    // owner Database's connection pool.
+    // Queries whether a table, index, or table of the given name exists.
+    bool table_exists(std::string_view table_name);
+    bool index_exists(std::string_view index_name);
+    bool trigger_exists(std::string_view trigger_name);
+
+    struct ColumnInfo {
+        std::string name;  ///< The column name
+        std::string type;  ///< The type (as given at table creation time, *not* normalized)
+        bool not_null;     ///< True if the column is non-nullable, false if nullable
+        bool has_default;  ///< True if the column has a non-null default, false otherwise
+        int primary_key;   ///< 0 for regular columns; otherwise 1-N for the N columns in the PK
+    };
+
+    // Queries and returns a table's columns; typically used for database creation/upgrading.
+    std::vector<ColumnInfo> get_columns(std::string_view table_name);
+
+    // Destroying this connection object drops its lease on the underlying connection and,
+    // if this is the last lease (i.e. the object has not been copied) the connection is
+    // returned to the owner Database's connection pool.
     ~Connection();
 };
 

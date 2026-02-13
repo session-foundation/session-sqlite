@@ -381,6 +381,35 @@ StatementWrapper Connection::prepared_st(const std::string& query) {
     return _conn->prepared_st(query);
 }
 
+static const auto item_exists =
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?"s;
+bool Connection::table_exists(std::string_view table_name) {
+    return prepared_get<int>(item_exists, "table"sv, table_name);
+}
+bool Connection::index_exists(std::string_view index_name) {
+    return prepared_get<int>(item_exists, "index"sv, index_name);
+}
+bool Connection::trigger_exists(std::string_view trigger_name) {
+    return prepared_get<int>(item_exists, "trigger"sv, trigger_name);
+}
+
+std::vector<Connection::ColumnInfo> Connection::get_columns(std::string_view table_name) {
+    std::vector<ColumnInfo> cols;
+    for (auto [name, type, notnull, has_default, pk] :
+         prepared_results<std::string, std::string, int, int, int>(
+                 "SELECT name, type, \"notnull\", dflt_value is not null, pk"
+                 " FROM pragma_table_info(?)",
+                 table_name)) {
+        auto& col = cols.emplace_back();
+        col.name = std::move(name);
+        col.type = std::move(type);
+        col.not_null = notnull;
+        col.has_default = has_default;
+        col.primary_key = pk;
+    }
+    return cols;
+}
+
 StatementWrapper::~StatementWrapper() {
     if (st) {
         st->tryReset();
