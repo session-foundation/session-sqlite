@@ -14,7 +14,7 @@ StatementWrapper conn::prepared_st(const std::string& query) {
         st = std::move(it->second.back());
         it->second.pop_back();
     } else {
-        st = std::make_unique<SQLite::Statement>(sql, query);
+        st = std::make_unique<SQLite::Statement>(sql, query, SQLite::PREPARE_PERSISTENT);
     }
 
     return {*this, std::move(st)};

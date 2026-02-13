@@ -13,29 +13,12 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "secure_buffer.hpp"
 
 namespace session::sqlite {
-
-// Simple wrapper class that can be used to bind a blob through the templated binding code below.
-// E.g. `exec_query(st, 100, 42, blob_binder{data})` binds the third parameter using no-copy blob
-// binding of the contained data.
-struct blob_binder {
-    std::string_view data;
-    explicit blob_binder(std::string_view d) : data{d} {}
-    explicit blob_binder(std::span<const std::byte> d) :
-            data{reinterpret_cast<const char*>(d.data()), d.size()} {}
-    explicit blob_binder(std::span<const unsigned char> d) :
-            data{reinterpret_cast<const char*>(d.data()), d.size()} {}
-    blob_binder(const void* d, size_t bytes) : data{reinterpret_cast<const char*>(d), bytes} {}
-};
-
-// Binds a string_view as a no-copy blob at parameter index i.
-inline void bind_blob_ref(SQLite::Statement& st, int i, std::string_view blob) {
-    st.bindNoCopy(i, static_cast<const void*>(blob.data()), blob.size());
-}
 
 // Decorating for extracting BLOB values from a query without unnecessary copying.  This is intended
 // to be called via `db::get` such as:
@@ -48,6 +31,9 @@ inline void bind_blob_ref(SQLite::Statement& st, int i, std::string_view blob) {
 //
 // Note that the lifetime limitation above means that this is *unsuitable* for one-shot methods like
 // `prepared_get/prepared_maybe_get` as they finalize the statement before returning the value.
+//
+// To *bind* input values as BLOBs, simply pass the value as a std::byte or unsigned char std::span
+// to the prepared_exec and similar functions.
 struct blob : std::span<const std::byte> {
     blob(SQLite::Column&& col) :
             std::span<const std::byte>{
@@ -84,36 +70,11 @@ struct blob_guts : T {
     }
 };
 
-// Helper to make a blob_binder that binds the memory contents of a trivially copyable type as a
-// blob parameter, such as:
-//
-//     struct Pubkey { std::array<char, 32> pk; };
-//     Pubkey pk = ...;
-//     auto x = conn.prepared_get<int64_t>("SELECT id FROM users WHERE pubkey = ?", bind_guts(pk));
-//
-// This can only be used if `T` is a trivially copyable, padding-free object.
-template <typename T>
-    requires std::has_unique_object_representations_v<T>
-blob_binder bind_guts(const T& v) {
-    return blob_binder{&v, sizeof(T)};
-}
-
 namespace detail {
     template <typename T>
     constexpr bool is_optional = false;
     template <typename T>
     constexpr bool is_optional<std::optional<T>> = true;
-
-    template <typename T>
-    constexpr bool is_cstr = false;
-    template <size_t N>
-    inline constexpr bool is_cstr<char[N]> = true;
-    template <size_t N>
-    inline constexpr bool is_cstr<const char[N]> = true;
-    template <>
-    inline constexpr bool is_cstr<char*> = true;
-    template <>
-    inline constexpr bool is_cstr<const char*> = true;
 
     template <typename T, typename... More>
     struct first_type {
@@ -126,22 +87,62 @@ namespace detail {
     using type_or_tuple =
             std::conditional_t<sizeof...(T) == 1, first_type_t<T...>, std::tuple<T...>>;
 
-    template <typename T>
-    void bind_oneshot_single(SQLite::Statement& st, int i, const T& val) {
-        if constexpr (std::is_same_v<T, std::string> || is_cstr<T>)
-            st.bindNoCopy(i, val);
-        else if constexpr (std::is_same_v<T, blob_binder>)
-            bind_blob_ref(st, i, val.data);
-        else if constexpr (is_optional<T>) {
-            if (val)
-                bind_oneshot_single(st, i, *val);
-            else
-                st.bind(i);  // binds NULL
-        } else if constexpr (std::same_as<T, std::nullptr_t>)
-            st.bind(i);
-        else
-            st.bind(i, val);
+    // Binds anything convertible to string_view (c strings, std::string, string_view itself).
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, std::string_view val) {
+        st.bindNoCopy(i, val);
     }
+    // Binds something convertible to a std::span of bytes or unsigned chars.  This allows you to
+    // bind things like `std::array<std::byte, 32>` of vectors of unsigned char, which will get
+    // converted to BLOBs.
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, std::span<const std::byte> val) {
+        st.bindNoCopy(i, static_cast<const void*>(val.data()), val.size());
+    }
+    inline void bind_oneshot_single(
+            SQLite::Statement& st, int i, std::span<const unsigned char> val) {
+        st.bindNoCopy(i, static_cast<const void*>(val.data()), val.size());
+    }
+    // Binds an optional<T>: if val is not set this binds a SQL NULL value, otherwise it recurses to
+    // bind whatever the value is.
+    template <typename T>
+    void bind_oneshot_single(SQLite::Statement& st, int i, const std::optional<T>& val) {
+        if (val)
+            bind_oneshot_single(st, i, *val);
+        else
+            st.bind(i);  // binds NULL
+    }
+    // Binds a variant by binding whatever value the variant has.  Thus you can bind, for example, a
+    // `variant<monostate, int, std::string>` to bind either a NULL, INTEGER, or TEXT value.  Each
+    // possible alternative must be something bindable.
+    template <typename... T>
+    void bind_oneshot_single(SQLite::Statement& st, int i, const std::variant<T...>& val) {
+        std::visit([&st, i](const auto& val) { bind_oneshot_single(st, i, val); }, val);
+    }
+    // Binds a std::monostate as a NULL value.  std::monostate is intended for use as a "not set"
+    // value in a variant as a more compact alternative to std::optional<std::variant<...>>.
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, const std::monostate) {
+        st.bind(i);
+    }
+
+    // nullptr_t becomes NULL
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, std::nullptr_t) {
+        st.bind(i);
+    }
+
+    // Bind integers and floats, but not uint64_t because SQL does not support values larger than
+    // max int64_t.
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, int64_t val) {
+        st.bind(i, val);
+    }
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, int32_t val) {
+        st.bind(i, val);
+    }
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, uint32_t val) {
+        st.bind(i, val);
+    }
+    inline void bind_oneshot_single(SQLite::Statement& st, int i, double val) {
+        st.bind(i, val);
+    }
+    void bind_oneshot_single(SQLite::Statement& st, int i, uint64_t val) = delete;
 
     template <typename... T, int... Index>
     void bind_oneshot(
@@ -156,9 +157,11 @@ namespace detail {
 // conn.prepared_st(...).
 
 // Called from exec_query and similar to bind statement parameters for immediate execution.
-// strings (and c strings) use no-copy binding; integer values are bound by value; nullptr binds to
-// NULL, and a std::optional binds to NULL (if empty) else the contained value.  You can bind a blob
-// (by reference, like strings) by passing `blob_binder{data}`.
+// string/string_views (and c strings) are bound as TEXT values using no-copy binding; integer and
+// double values are bound by value; nullptr binds to NULL, std::optional binds to either NULL (if
+// empty) or the contained value; variant binds whichever variant value is held.  std::spans of
+// std::byte or unsigned char spans (or types convertible to them) bind as BLOBs containing the
+// contained value.
 template <typename... T>
 void bind_oneshot(SQLite::Statement& st, const T&... bind) {
     detail::bind_oneshot(st, std::make_integer_sequence<int, sizeof...(T)>{}, bind...);
@@ -339,7 +342,7 @@ bool enabled(Encryption type);
 ///
 /// If you are using a raw key (as opposed to a user-supplied password) with one of the preferred
 /// ciphers (AEGIS, ChaCha20, or Ascon128) then all you need to pass is this value.  If you are
-/// using a password (either plaintext or wrapped with argon2_password) then you must also specify
+/// using a password (either plaintext or wrapped with argon2id_password) then you must also specify
 /// and store a salt yourself, and must pass it every time you open the database with the
 /// `salt{...}` option.
 ///
