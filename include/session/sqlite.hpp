@@ -6,6 +6,7 @@
 #include <concepts>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -547,6 +548,21 @@ struct open_create {
 // available if you need runtime selection.
 inline constexpr open_create no_create{false};
 
+class Connection;
+
+// Takes a callback to run immediately after opening the database but before it is returned for use
+// by any thread.  This can be used to execute additional initial database pragma or to do things
+// like registering user-defined functions.  This only runs the first time the connection is
+// established, immediately after opening, *not* on each fetch of the connection from the pool.
+//
+// Note that the callback could be called from any thread at any time (and so if any required
+// synchronization is required it needs to be done inside the callback).
+//
+// This does nothing if the actual contained function is not set.
+struct post_open {
+    std::function<void(Connection&)> post_open;
+};
+
 namespace detail {
     template <typename T, typename... Types>
     concept any_of = (std::same_as<std::remove_cvref_t<T>, Types> || ...);
@@ -584,12 +600,10 @@ concept DatabaseEncryptOption =
 
 template <typename T>
 concept DatabaseBehaviourOption =
-        detail::any_of<T, busy_timeout, wal_mode, open_readonly, open_create>;
+        detail::any_of<T, busy_timeout, wal_mode, open_readonly, open_create, post_open>;
 
 template <typename T>
 concept DatabaseOption = DatabaseEncryptOption<T> || DatabaseBehaviourOption<T>;
-
-class Connection;
 
 /// Database connection managing class.  This class operates as a sort of thread-safe SQLite3
 /// connection pool where each thread gets its own connection as needed so that multiple threads do
@@ -657,6 +671,7 @@ class Database {
     std::filesystem::path _db_path;
     Encryption _enc;
     int _open_flags;
+    std::function<void(Connection&)> _post_open;
     std::chrono::milliseconds _busy_timeout;
     bool _wal = true;
 
@@ -717,7 +732,8 @@ class Database {
             std::optional<busy_timeout> busy_timeout,
             std::optional<wal_mode> wal_mode,
             std::optional<open_create> create,
-            std::optional<open_readonly> readonly);
+            std::optional<open_readonly> readonly,
+            std::optional<post_open> post_open);
 
   public:
     // Constructor: this takes a database path and encryption type, followed by optional argument
@@ -741,7 +757,8 @@ class Database {
                     _maybe_instance<busy_timeout>(opts...),
                     _maybe_instance<wal_mode>(opts...),
                     _maybe_instance<open_create>(opts...),
-                    _maybe_instance<open_readonly>(opts...)} {
+                    _maybe_instance<open_readonly>(opts...),
+                    _maybe_instance<post_open>(opts...)} {
         static_assert(
                 detail::unique_types<Opt...>,
                 "Database constructor option arguments must be unique");

@@ -63,7 +63,8 @@ Database::Database(
         std::optional<busy_timeout> busy_t_o,
         std::optional<wal_mode> wal_mode,
         std::optional<open_create> create,
-        std::optional<open_readonly> readonly) :
+        std::optional<open_readonly> readonly,
+        std::optional<post_open> post_open) :
         _db_path{std::move(db_path)}, _enc{enc} {
 
     if (!enabled(_enc))
@@ -191,6 +192,9 @@ Database::Database(
     if (salt)
         _pragma_salt.emplace(
                 "PRAGMA cipher_salt = '" + oxenc::to_hex(salt->begin(), salt->end()) + "'");
+
+    if (post_open && post_open->post_open)
+        _post_open = std::move(post_open->post_open);
 
     // Get an initial connection so that we are testing that we can connect here in the constructor.
     // We immediately drop it, which returns that single connection to the idle conns pool to be
@@ -352,9 +356,14 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
         throw std::runtime_error{"Failed to enable foreign key integrity: "s + e.what()};
     }
 
-    _conn_in_use.emplace_back(tid, conn);
+    Connection c{*this, conn};
 
-    return Connection{*this, std::move(conn)};
+    if (_post_open)
+        _post_open(c);
+
+    _conn_in_use.emplace_back(tid, std::move(conn));
+
+    return c;
 }
 
 Connection Database::unique_conn() {
