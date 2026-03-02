@@ -596,7 +596,7 @@ namespace detail {
 
 template <typename T>
 concept DatabaseEncryptOption =
-        detail::any_of<T, plaintext_header_t, salt, raw_key, argon2id_password, plaintext_password>;
+        detail::any_of<T, Encryption, plaintext_header_t, salt, raw_key, argon2id_password, plaintext_password>;
 
 template <typename T>
 concept DatabaseBehaviourOption =
@@ -723,7 +723,7 @@ class Database {
     // than the header.
     Database(
             std::filesystem::path db_path,
-            Encryption enc,
+            std::optional<Encryption> enc,
             std::optional<plaintext_password> plaintext_pass,
             std::optional<raw_key> raw_key,
             std::optional<argon2id_password> argon2id_pass,
@@ -736,8 +736,9 @@ class Database {
             std::optional<post_open> post_open);
 
   public:
-    // Constructor: this takes a database path and encryption type, followed by optional argument
-    // tags for other supported configuration.
+    // Constructor: this takes a database path followed by any number of optional argument tags (see
+    // above) for other supported configuration.  If no encryption value is given, defaults to
+    // AEGIS256.
     //
     // The database is created at the given path, creating it if it does not exist.
     //
@@ -745,10 +746,10 @@ class Database {
     // that in-memory databases do not actually apply any encryption as encryption generally only
     // applies when pages are written to disk.
     template <DatabaseOption... Opt>
-    Database(std::filesystem::path db_path, Encryption enc, const Opt&... opts) :
+    Database(std::filesystem::path db_path, const Opt&... opts) :
             Database{
                     std::move(db_path),
-                    enc,
+                    _maybe_instance<Encryption>(opts...),
                     _maybe_instance<plaintext_password>(opts...),
                     _maybe_instance<raw_key>(opts...),
                     _maybe_instance<argon2id_password>(opts...),

@@ -54,7 +54,7 @@ bool enabled(Encryption type) {
 
 Database::Database(
         std::filesystem::path db_path,
-        Encryption enc,
+        std::optional<Encryption> enc,
         std::optional<plaintext_password> plaintext_pass,
         std::optional<raw_key> raw_key,
         std::optional<argon2id_password> argon2id_pass,
@@ -65,7 +65,7 @@ Database::Database(
         std::optional<open_create> create,
         std::optional<open_readonly> readonly,
         std::optional<post_open> post_open) :
-        _db_path{std::move(db_path)}, _enc{enc} {
+        _db_path{std::move(db_path)}, _enc{enc.value_or(Encryption::AEGIS256)} {
 
     if (!enabled(_enc))
         throw std::runtime_error{
