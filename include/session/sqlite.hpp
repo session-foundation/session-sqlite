@@ -21,6 +21,11 @@
 
 namespace session::sqlite {
 
+class blob_size_error : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
 // Decorating for extracting BLOB values from a query without unnecessary copying.  This is intended
 // to be called via `db::get` such as:
 //
@@ -35,17 +40,29 @@ namespace session::sqlite {
 //
 // To *bind* input values as BLOBs, simply pass the value as a std::byte or unsigned char std::span
 // to the prepared_exec and similar functions.
-struct blob : std::span<const std::byte> {
+//
+// If a fixed Extent is used then you get an extended fixed-Extent span; this will throw an
+// exception if the returned value does not match: it is generally recommended to only be used when
+// the database schema or query conditions already ensure the length.
+template <size_t Extent = std::dynamic_extent>
+struct blob : std::span<const std::byte, Extent> {
     blob(SQLite::Column&& col) :
-            std::span<const std::byte>{
-                    static_cast<const std::byte*>(col.getBlob()),
-                    static_cast<size_t>(col.getBytes())} {}
+            std::span<const std::byte, Extent>{
+                    static_cast<const std::byte*>(col.getBlob()), [&](size_t len) {
+                        if constexpr (Extent != std::dynamic_extent)
+                            if (len != Extent)
+                                throw blob_size_error{
+                                        "Unable to extract BLOB: expected " +
+                                        std::to_string(Extent) + " bytes, got " +
+                                        std::to_string(len)};
+                        return len;
+                    }(col.getBytes())} {}
 };
 
-class blob_size_error : public std::runtime_error {
-  public:
-    using std::runtime_error::runtime_error;
-};
+template <typename T>
+constexpr bool is_blob = false;
+template <size_t Extent>
+constexpr bool is_blob<blob<Extent>> = true;
 
 // Takes a trivial, no-padding struct from which we can directly initialize from the (fixed size)
 // stored blob value.  The type `T` must be a trivially copyable type.  Unlike `blob` this value
@@ -595,8 +612,14 @@ namespace detail {
 }  // namespace detail
 
 template <typename T>
-concept DatabaseEncryptOption =
-        detail::any_of<T, Encryption, plaintext_header_t, salt, raw_key, argon2id_password, plaintext_password>;
+concept DatabaseEncryptOption = detail::any_of<
+        T,
+        Encryption,
+        plaintext_header_t,
+        salt,
+        raw_key,
+        argon2id_password,
+        plaintext_password>;
 
 template <typename T>
 concept DatabaseBehaviourOption =
@@ -956,7 +979,7 @@ class Connection {
     /// parameters), executes it, and returns the value.  Throws if the query returns 0 or more
     /// than 1 rows.
     template <typename... T, typename... Bind>
-        requires(!std::same_as<blob, Bind> && ...)
+        requires(!is_blob<Bind> && ...)
     auto prepared_get(const std::string& query, const Bind&... bind) {
         return exec_and_get<T...>(prepared_st(query), bind...);
     }
@@ -965,7 +988,7 @@ class Connection {
     /// parameters), executes it, and returns the value or nullopt if the query returned no
     /// rows. Throws if the query returns more than 1 rows.
     template <typename... T, typename... Bind>
-        requires(!std::same_as<blob, Bind> && ...)
+        requires(!is_blob<Bind> && ...)
     auto prepared_maybe_get(const std::string& query, const Bind&... bind) {
         return exec_and_maybe_get<T...>(prepared_st(query), bind...);
     }
