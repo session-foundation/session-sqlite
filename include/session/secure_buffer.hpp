@@ -89,8 +89,9 @@ class secure_buffer {
 
     secure_buffer(const secure_buffer&) = delete;
     secure_buffer& operator=(const secure_buffer&) = delete;
-    secure_buffer(secure_buffer&&) = delete;
-    secure_buffer& operator=(secure_buffer&&) = delete;
+
+    secure_buffer(secure_buffer&&);
+    secure_buffer& operator=(secure_buffer&&);
 };
 
 extern template struct secure_buffer::accessor<true>;

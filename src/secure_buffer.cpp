@@ -103,4 +103,14 @@ secure_buffer::rw_accessor secure_buffer::update(std::span<const std::byte> key)
     return rw;
 }
 
+secure_buffer::secure_buffer(secure_buffer&& other) {
+    *this = std::move(other);
+}
+
+secure_buffer& secure_buffer::operator=(secure_buffer&& other) {
+    std::swap(buf, other.buf);
+    std::swap(accessors, other.accessors);
+    std::swap(writers, other.writers);
+}
+
 }  // namespace session
