@@ -41,12 +41,12 @@ class blob_size_error : public std::runtime_error {
 // To *bind* input values as BLOBs, simply pass the value as a std::byte or unsigned char std::span
 // to the prepared_exec and similar functions.
 //
-// If a fixed Extent is used then you get an extended fixed-Extent span; this will throw an
+// When using blobn<N> with fixed N then you get an extended fixed-Extent span; this will throw an
 // exception if the returned value does not match: it is generally recommended to only be used when
 // the database schema or query conditions already ensure the length.
 template <size_t Extent = std::dynamic_extent>
-struct blob : std::span<const std::byte, Extent> {
-    blob(SQLite::Column&& col) :
+struct blobn : std::span<const std::byte, Extent> {
+    blobn(SQLite::Column&& col) :
             std::span<const std::byte, Extent>{
                     static_cast<const std::byte*>(col.getBlob()), [&](size_t len) {
                         if constexpr (Extent != std::dynamic_extent)
@@ -58,11 +58,12 @@ struct blob : std::span<const std::byte, Extent> {
                         return len;
                     }(col.getBytes())} {}
 };
+using blob = blobn<std::dynamic_extent>;
 
 template <typename T>
 constexpr bool is_blob = false;
 template <size_t Extent>
-constexpr bool is_blob<blob<Extent>> = true;
+constexpr bool is_blob<blobn<Extent>> = true;
 
 // Takes a trivial, no-padding struct from which we can directly initialize from the (fixed size)
 // stored blob value.  The type `T` must be a trivially copyable type.  Unlike `blob` this value
