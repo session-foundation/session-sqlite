@@ -90,6 +90,7 @@ class secure_buffer {
     secure_buffer(const secure_buffer&) = delete;
     secure_buffer& operator=(const secure_buffer&) = delete;
 
+    // Move constructor/assignment.  There should not be any active accessors!
     secure_buffer(secure_buffer&&);
     secure_buffer& operator=(secure_buffer&&);
 };

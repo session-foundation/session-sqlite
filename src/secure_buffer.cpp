@@ -108,9 +108,10 @@ secure_buffer::secure_buffer(secure_buffer&& other) {
 }
 
 secure_buffer& secure_buffer::operator=(secure_buffer&& other) {
+    if (other.accessors)
+        throw std::logic_error{"Cannot move a secure_buffer with active accessors!"};
     std::swap(buf, other.buf);
-    std::swap(accessors, other.accessors);
-    std::swap(writers, other.writers);
+    return *this;
 }
 
 }  // namespace session
