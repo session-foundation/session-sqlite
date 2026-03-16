@@ -120,22 +120,6 @@ namespace detail {
             SQLite::Statement& st, int i, std::span<const unsigned char> val) {
         st.bindNoCopy(i, static_cast<const void*>(val.data()), val.size());
     }
-    // Binds an optional<T>: if val is not set this binds a SQL NULL value, otherwise it recurses to
-    // bind whatever the value is.
-    template <typename T>
-    void bind_oneshot_single(SQLite::Statement& st, int i, const std::optional<T>& val) {
-        if (val)
-            bind_oneshot_single(st, i, *val);
-        else
-            st.bind(i);  // binds NULL
-    }
-    // Binds a variant by binding whatever value the variant has.  Thus you can bind, for example, a
-    // `variant<monostate, int, std::string>` to bind either a NULL, INTEGER, or TEXT value.  Each
-    // possible alternative must be something bindable.
-    template <typename... T>
-    void bind_oneshot_single(SQLite::Statement& st, int i, const std::variant<T...>& val) {
-        std::visit([&st, i](const auto& val) { bind_oneshot_single(st, i, val); }, val);
-    }
     // Binds a std::monostate as a NULL value.  std::monostate is intended for use as a "not set"
     // value in a variant as a more compact alternative to std::optional<std::variant<...>>.
     inline void bind_oneshot_single(SQLite::Statement& st, int i, const std::monostate) {
@@ -162,6 +146,23 @@ namespace detail {
         st.bind(i, val);
     }
     void bind_oneshot_single(SQLite::Statement& st, int i, uint64_t val) = delete;
+
+    // Binds an optional<T>: if val is not set this binds a SQL NULL value, otherwise it recurses to
+    // bind whatever the value is.
+    template <typename T>
+    void bind_oneshot_single(SQLite::Statement& st, int i, const std::optional<T>& val) {
+        if (val)
+            bind_oneshot_single(st, i, *val);
+        else
+            st.bind(i);  // binds NULL
+    }
+    // Binds a variant by binding whatever value the variant has.  Thus you can bind, e.g., a
+    // `variant<monostate, int, std::string>` to bind either a NULL, INTEGER, or TEXT value.  Each
+    // possible alternative must be something bindable.
+    template <typename... T>
+    void bind_oneshot_single(SQLite::Statement& st, int i, const std::variant<T...>& val) {
+        std::visit([&st, i](const auto& val) { bind_oneshot_single(st, i, val); }, val);
+    }
 
     template <typename... T, int... Index>
     void bind_oneshot(
