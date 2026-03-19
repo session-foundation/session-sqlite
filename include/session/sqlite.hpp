@@ -206,13 +206,35 @@ int exec_query(SQLite::Database& db, const std::string& query, const T&... bind)
 // Retrieves a single row of values from the current state of a statement (i.e. after a
 // executeStep() call that is expecting a return value).  If `T...` is a single type then this
 // returns the single T value; if T... has multiple types then you get back a tuple of values.
+//
+// std::optional<T> columns are handled specially: a SQL NULL column value produces std::nullopt
+// rather than a default-constructed T (since SQLite::Column::operator T() returns 0/empty for
+// NULL values, which would produce a non-empty optional{0} without this special handling).
+namespace detail {
+    template <typename T, int I>
+    T get_col(SQLite::Statement& st) {
+        if constexpr (is_optional<T>) {
+            auto col = st.getColumn(I);
+            if (col.isNull())
+                return std::nullopt;
+            return std::optional{static_cast<typename T::value_type>(col)};
+        } else {
+            return static_cast<T>(st.getColumn(I));
+        }
+    }
+    template <typename... T, int... Is>
+    std::tuple<T...> get_tuple(SQLite::Statement& st, std::integer_sequence<int, Is...>) {
+        return {get_col<T, Is>(st)...};
+    }
+}  // namespace detail
 template <typename T>
 T get(SQLite::Statement& st) {
-    return static_cast<T>(st.getColumn(0));
+    return detail::get_col<T, 0>(st);
 }
 template <typename T1, typename T2, typename... Tn>
 std::tuple<T1, T2, Tn...> get(SQLite::Statement& st) {
-    return st.getColumns<std::tuple<T1, T2, Tn...>, 2 + sizeof...(Tn)>();
+    return detail::get_tuple<T1, T2, Tn...>(
+            st, std::make_integer_sequence<int, 2 + sizeof...(Tn)>{});
 }
 
 // Steps a statement to completion that is expected to return at most one row, optionally binding
