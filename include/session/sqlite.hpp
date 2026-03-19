@@ -758,16 +758,20 @@ class Database {
     template <typename T, typename... Opts>
     static constexpr auto _maybe_instance(Opts&&... opts) {
         using Ret = std::optional<T>;
-        auto finder = []<typename Opt, typename... More>(
-                              auto&& self, Opt&& o, More&&... more) -> Ret {
-            if constexpr (std::same_as<std::remove_cvref_t<Opt>, T>)
-                return std::make_optional<T>(std::forward<Opt>(o));
-            else if constexpr (sizeof...(More) > 0)
-                return self(self, std::forward<More>(more)...);
-            else
-                return std::nullopt;
-        };
-        return finder(finder, std::forward<Opts>(opts)...);
+        if constexpr (sizeof...(Opts) == 0)
+            return Ret{std::nullopt};
+        else {
+            auto finder = []<typename Opt, typename... More>(
+                                  auto&& self, Opt&& o, More&&... more) -> Ret {
+                if constexpr (std::same_as<std::remove_cvref_t<Opt>, T>)
+                    return std::make_optional<T>(std::forward<Opt>(o));
+                else if constexpr (sizeof...(More) > 0)
+                    return self(self, std::forward<More>(more)...);
+                else
+                    return std::nullopt;
+            };
+            return finder(finder, std::forward<Opts>(opts)...);
+        }
     }
 
     // Internal constructor invoked by the templated generic one with all templated options
@@ -789,8 +793,10 @@ class Database {
 
   public:
     // Constructor: this takes a database path followed by any number of optional argument tags (see
-    // above) for other supported configuration.  If no encryption value is given, defaults to
-    // AEGIS256.
+    // above) for other supported configuration.  If no encryption value is given but at least one
+    // other encryption-related option (e.g. a password or key) is provided, defaults to AEGIS256.
+    // If no encryption-related option is provided at all, defaults to no encryption
+    // (Encryption::None).
     //
     // The database is created at the given path, creating it if it does not exist.
     //
@@ -801,7 +807,9 @@ class Database {
     Database(std::filesystem::path db_path, const Opt&... opts) :
             Database{
                     std::move(db_path),
-                    _maybe_instance<Encryption>(opts...),
+                    (DatabaseEncryptOption<Opt> || ...)
+                            ? _maybe_instance<Encryption>(opts...)
+                            : std::optional<Encryption>{Encryption::None},
                     _maybe_instance<plaintext_password>(opts...),
                     _maybe_instance<raw_key>(opts...),
                     _maybe_instance<argon2id_password>(opts...),

@@ -65,6 +65,9 @@ Database::Database(
         std::optional<open_create> create,
         std::optional<open_readonly> readonly,
         std::optional<post_open> post_open) :
+        // enc is nullopt only when encryption-related options were given but Encryption itself
+        // was not; in that case AEGIS256 is the default.  When no encryption-related options are
+        // given at all, the public constructor passes Encryption::None explicitly.
         _db_path{std::move(db_path)}, _enc{enc.value_or(Encryption::AEGIS256)} {
 
     if (!enabled(_enc))
