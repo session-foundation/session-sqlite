@@ -243,6 +243,11 @@ std::tuple<T1, T2, Tn...> get(SQLite::Statement& st) {
 template <typename... T, typename... Args>
 std::optional<detail::type_or_tuple<T...>> exec_and_maybe_get(
         SQLite::Statement& st, const Args&... bind) {
+    static_assert(
+            (!is_blob<T> && ...),
+            "blobn<N>/blob cannot be used as a return type for exec_and_maybe_get/exec_and_get/"
+            "prepared_get/prepared_maybe_get: the returned span is invalidated when the statement "
+            "is finalized. Use blob_guts<T> instead to copy the data out.");
     bind_oneshot(st, bind...);
     std::optional<detail::type_or_tuple<T...>> result;
     while (st.executeStep()) {
