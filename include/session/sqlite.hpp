@@ -217,7 +217,7 @@ namespace detail {
             auto col = st.getColumn(I);
             if (col.isNull())
                 return std::nullopt;
-            return std::optional{static_cast<typename T::value_type>(col)};
+            return std::optional{static_cast<typename T::value_type>(std::move(col))};
         } else {
             return static_cast<T>(st.getColumn(I));
         }
