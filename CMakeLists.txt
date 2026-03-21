@@ -103,14 +103,22 @@ set(SQLITE_OMIT_LOAD_EXTENSION ON CACHE BOOL "" FORCE)
 
 add_subdirectory(SQLiteCpp EXCLUDE_FROM_ALL)
 
+# session::secure_buffer is a separate target so that code needing only secure memory management
+# (e.g. the libsession-util crypto library) can depend on it without pulling in SQLite and the
+# rest of the session-sqlite library.
+add_library(session_secure_buffer src/secure_buffer.cpp)
+target_compile_features(session_secure_buffer PUBLIC cxx_std_20)
+target_include_directories(session_secure_buffer PUBLIC include)
+target_link_libraries(session_secure_buffer PRIVATE sqlite_sodium)
+add_library(session::secure_buffer ALIAS session_secure_buffer)
+
 add_library(session_sqlite
     src/sqlite.cpp
-    src/conn.cpp
-    src/secure_buffer.cpp)
+    src/conn.cpp)
 target_compile_features(session_sqlite PUBLIC cxx_std_20)
 target_include_directories(session_sqlite PUBLIC include)
-target_link_libraries(session_sqlite PUBLIC SQLiteCpp fmt)
-target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc sqlite_sodium)
+target_link_libraries(session_sqlite PUBLIC SQLiteCpp fmt session::secure_buffer)
+target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc)
 
 if((SESSION_SQLITE_BUILD_SQLITE3MC AND SQLITE3MC_WITH_LIBICU) OR
     (NOT SESSION_SQLITE_BUILD_SQLITE3MC AND SESSION_EXTERNAL_SQLITE_LIBICU))
