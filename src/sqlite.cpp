@@ -7,7 +7,6 @@
 #endif
 
 #include <SQLiteCpp/Database.h>
-#include <oxenc/hex.h>
 #include <sodium/core.h>
 #include <sodium/crypto_pwhash.h>
 #include <sodium/randombytes.h>
@@ -26,6 +25,24 @@ namespace session::sqlite {
 static void sodium_initialize() {
     if (sodium_init() == -1)
         throw std::runtime_error{"Sodium init failed"};
+}
+
+// Writes the lowercase hex representation of `bytes` to `out`, which must have room for
+// 2*bytes.size() characters.
+static void to_hex(std::span<const std::byte> bytes, char* out) {
+    constexpr char digits[] = "0123456789abcdef";
+    for (auto b : bytes) {
+        auto v = std::to_integer<unsigned char>(b);
+        *out++ = digits[v >> 4];
+        *out++ = digits[v & 0xf];
+    }
+}
+
+// Returns the lowercase hex representation of `bytes` as a string.
+static std::string to_hex(std::span<const std::byte> bytes) {
+    std::string result(bytes.size() * 2, '\0');
+    to_hex(bytes, result.data());
+    return result;
 }
 
 using namespace std::literals;
@@ -136,7 +153,7 @@ Database::Database(
         auto rw = _key.resize(67);
         rw.buf[0] = std::byte{'x'};
         rw.buf[1] = std::byte{'\''};
-        oxenc::to_hex(key.begin(), key.end(), reinterpret_cast<char*>(rw.buf.data() + 2));
+        to_hex(key, reinterpret_cast<char*>(rw.buf.data() + 2));
         rw.buf.back() = std::byte{'\''};
     };
 
@@ -194,7 +211,7 @@ Database::Database(
 
     if (salt)
         _pragma_salt.emplace(
-                "PRAGMA cipher_salt = '" + oxenc::to_hex(salt->begin(), salt->end()) + "'");
+                "PRAGMA cipher_salt = '" + to_hex(*salt) + "'");
 
     if (post_open && post_open->post_open)
         _post_open = std::move(post_open->post_open);
