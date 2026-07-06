@@ -241,7 +241,7 @@ void Database::conn_returned() {
     for (auto it = _conn_in_use.begin(); it != _conn_in_use.end();) {
         auto& [th, conn] = *it;
         assert(conn);  // If we end up with a dead pointer in here then some code is broken
-        if (conn.unique()) {
+        if (conn.use_count() == 1) {
             if (_conn_max_idle < 0 || _conn_unused.size() < static_cast<size_t>(_conn_max_idle))
                 _conn_unused.push_back(std::move(conn));
             // else we have enough idle connections so let it drop
