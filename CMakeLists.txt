@@ -118,7 +118,7 @@ add_library(session_sqlite
 target_compile_features(session_sqlite PUBLIC cxx_std_20)
 target_include_directories(session_sqlite PUBLIC include)
 target_link_libraries(session_sqlite PUBLIC SQLiteCpp fmt session::secure_buffer)
-target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc)
+target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc sqlite_sodium)
 
 if((SESSION_SQLITE_BUILD_SQLITE3MC AND SQLITE3MC_WITH_LIBICU) OR
     (NOT SESSION_SQLITE_BUILD_SQLITE3MC AND SESSION_EXTERNAL_SQLITE_LIBICU))
