@@ -131,21 +131,32 @@ namespace detail {
         st.bind(i);
     }
 
-    // Bind integers and floats, but not uint64_t because SQL does not support values larger than
-    // max int64_t.
-    inline void bind_oneshot_single(SQLite::Statement& st, int i, int64_t val) {
-        st.bind(i, val);
-    }
-    inline void bind_oneshot_single(SQLite::Statement& st, int i, int32_t val) {
-        st.bind(i, val);
-    }
-    inline void bind_oneshot_single(SQLite::Statement& st, int i, uint32_t val) {
-        st.bind(i, val);
+    // Bind integers, dispatching to a 32- or 64-bit SQLite bind by size.  This is a single
+    // constrained template rather than fixed-width (int32_t/int64_t) overloads because the exact
+    // fundamental type behind a fixed-width alias varies by platform: e.g. on LP64 targets int64_t
+    // is `long`, so a `long long` argument (such as libc++'s chrono duration rep) matches none of
+    // the fixed widths exactly and is ambiguous.  Unsigned 64-bit values are excluded here (and
+    // rejected via the deleted overload below) because SQL does not support values larger than max
+    // int64_t.
+    template <std::integral T>
+        requires (std::signed_integral<T> || sizeof(T) <= sizeof(uint32_t))
+    void bind_oneshot_single(SQLite::Statement& st, int i, T val) {
+        if constexpr (std::unsigned_integral<T>)
+            st.bind(i, static_cast<uint32_t>(val));
+        else if constexpr (sizeof(T) <= sizeof(int32_t))
+            st.bind(i, static_cast<int32_t>(val));
+        else
+            st.bind(i, static_cast<int64_t>(val));
     }
     inline void bind_oneshot_single(SQLite::Statement& st, int i, double val) {
         st.bind(i, val);
     }
-    void bind_oneshot_single(SQLite::Statement& st, int i, uint64_t val) = delete;
+    // Reject unsigned values wider than 32 bits (uint64_t and friends): SQL does not support values
+    // larger than max int64_t.  A constrained template (rather than a fixed uint64_t overload)
+    // catches every such type -- uint64_t, unsigned long, unsigned long long -- on every platform.
+    template <std::unsigned_integral T>
+        requires (sizeof(T) > sizeof(uint32_t))
+    void bind_oneshot_single(SQLite::Statement& st, int i, T val) = delete;
 
     // Binds an optional<T>: if val is not set this binds a SQL NULL value, otherwise it recurses to
     // bind whatever the value is.
