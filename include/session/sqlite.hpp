@@ -989,6 +989,13 @@ class Connection {
     Connection(Database& db, std::shared_ptr<detail::conn> conn);
 
   public:
+    // Movable so that Database code holding _conn_mutex can return one by value; see ~Connection.
+    // Not copyable: conn_returned() reads use_count() == 1 as "nothing is using this connection".
+    Connection(Connection&& c) noexcept : _conn{std::move(c._conn)}, db{c.db}, sql{c.sql} {}
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
+    Connection& operator=(Connection&&) = delete;
+
     // The owning Database
     Database& db;
 
@@ -1058,8 +1065,11 @@ class Connection {
     std::vector<ColumnInfo> get_columns(std::string_view table_name);
 
     // Destroying this connection object drops its lease on the underlying connection and,
-    // if this is the last lease (i.e. the object has not been copied) the connection is
-    // returned to the owner Database's connection pool.
+    // if this is the last lease, the connection is returned to the owner Database's connection
+    // pool.
+    //
+    // Acquires _conn_mutex to do so: a Connection must not be allowed to destruct anywhere in
+    // Database that already holds that lock, or the thread deadlocks against itself.
     ~Connection();
 };
 
