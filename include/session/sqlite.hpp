@@ -60,10 +60,14 @@ struct blobn : std::span<const std::byte, Extent> {
 };
 using blob = blobn<std::dynamic_extent>;
 
+// True for a blob view, and for anything that merely wraps one: an optional<blob> is the same
+// hazard, since wrapping a span does not make it outlive the statement it points into.
 template <typename T>
-constexpr bool is_blob = false;
+constexpr bool holds_blob_view = false;
 template <size_t Extent>
-constexpr bool is_blob<blobn<Extent>> = true;
+constexpr bool holds_blob_view<blobn<Extent>> = true;
+template <typename T>
+constexpr bool holds_blob_view<std::optional<T>> = holds_blob_view<T>;
 
 // Takes a trivial, no-padding struct from which we can directly initialize from the (fixed size)
 // stored blob value.  The type `T` must be a trivially copyable type.  Unlike `blob` this value
@@ -255,10 +259,11 @@ template <typename... T, typename... Args>
 std::optional<detail::type_or_tuple<T...>> exec_and_maybe_get(
         SQLite::Statement& st, const Args&... bind) {
     static_assert(
-            (!is_blob<T> && ...),
+            !(holds_blob_view<T> || ...),
             "blobn<N>/blob cannot be used as a return type for exec_and_maybe_get/exec_and_get/"
-            "prepared_get/prepared_maybe_get: the returned span is invalidated when the statement "
-            "is finalized. Use blob_guts<T> instead to copy the data out.");
+            "prepared_get/prepared_maybe_get, on its own or inside an optional: the returned span "
+            "is invalidated when the statement is finalized. Use blob_guts<T> instead to copy the "
+            "data out.");
     bind_oneshot(st, bind...);
     std::optional<detail::type_or_tuple<T...>> result;
     while (st.executeStep()) {
@@ -1034,7 +1039,7 @@ class Connection {
     /// parameters), executes it, and returns the value.  Throws if the query returns 0 or more
     /// than 1 rows.
     template <typename... T, typename... Bind>
-        requires(!is_blob<Bind> && ...)
+        requires(!(holds_blob_view<Bind> || ...))
     auto prepared_get(const std::string& query, const Bind&... bind) {
         return exec_and_get<T...>(prepared_st(query), bind...);
     }
@@ -1043,7 +1048,7 @@ class Connection {
     /// parameters), executes it, and returns the value or nullopt if the query returned no
     /// rows. Throws if the query returns more than 1 rows.
     template <typename... T, typename... Bind>
-        requires(!is_blob<Bind> && ...)
+        requires(!(holds_blob_view<Bind> || ...))
     auto prepared_maybe_get(const std::string& query, const Bind&... bind) {
         return exec_and_maybe_get<T...>(prepared_st(query), bind...);
     }
