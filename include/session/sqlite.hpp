@@ -7,8 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -25,6 +27,52 @@ class blob_size_error : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
 };
+
+/// A bind argument that binds each element of a sequence to a consecutive parameter, rather than
+/// binding the sequence as one value.
+///
+/// This is the bind-side counterpart of `placeholders()`, and exists for the one query shape whose
+/// parameter count is not known until runtime:
+///
+///     auto query = "SELECT ... WHERE id IN ({})"_format(placeholders(ids.size()));
+///     for (auto&& [a, b] : conn.prepared_results<int, int>(query, bind_each{ids}))
+///
+/// Without it a variable-length `IN` list cannot go through the normal bind path at all -- the
+/// parameters are a template pack, and a runtime-sized sequence cannot be expanded into one -- which
+/// leaves a caller hand-binding a `prepared_st` in a loop and losing `prepared_results` with it.
+///
+/// Takes a container (or view), or an iterator pair for binding part of one:
+///
+///     conn.prepared_exec(query, before, bind_each{ids}, after);
+///     conn.prepared_exec(query, bind_each{ids.begin(), ids.begin() + n});
+///
+/// It consumes as many parameters as the sequence has elements, and the parameters around it number
+/// from wherever it leaves off, so it composes with ordinary bind values on either side and with
+/// more than one of itself.  **The count must match the placeholders in the query**: too few and
+/// the rest bind as NULL, too many and SQLite throws.  Deriving both from the same sequence is what
+/// keeps them in step.
+///
+/// Holds iterators, and binds strings without copying as everywhere else here, so the sequence and
+/// whatever its elements reference must both outlive the statement's execution.  Intended to be
+/// written inline in the bind call, where that is automatic.
+template <std::input_iterator It, std::sentinel_for<It> End = It>
+struct bind_each {
+    It first;
+    End last;
+
+    bind_each(It first, End last) : first{std::move(first)}, last{std::move(last)} {}
+
+    template <std::ranges::input_range R>
+    bind_each(const R& values) :
+            first{std::ranges::begin(values)}, last{std::ranges::end(values)} {}
+};
+
+template <std::ranges::input_range R>
+bind_each(const R&)
+        -> bind_each<std::ranges::iterator_t<const R>, std::ranges::sentinel_t<const R>>;
+
+template <std::input_iterator It, std::sentinel_for<It> End>
+bind_each(It, End) -> bind_each<It, End>;
 
 // Decorating for extracting BLOB values from a query without unnecessary copying.  This is intended
 // to be called via `db::get` such as:
@@ -179,10 +227,25 @@ namespace detail {
         std::visit([&st, i](const auto& val) { bind_oneshot_single(st, i, val); }, val);
     }
 
-    template <typename... T, int... Index>
-    void bind_oneshot(
-            SQLite::Statement& st, std::integer_sequence<int, Index...>, const T&... bind) {
-        (bind_oneshot_single(st, Index + 1, bind), ...);
+    // Binds one argument, advancing `i` past whatever parameters it consumed.  One for an ordinary
+    // value; as many as it has elements for a `bind_each`, which is why the parameter number is a
+    // running counter rather than the argument's position: with a sequence in the pack the two stop
+    // being the same thing.
+    template <typename T>
+    void bind_oneshot_arg(SQLite::Statement& st, int& i, const T& val) {
+        bind_oneshot_single(st, i++, val);
+    }
+
+    template <std::input_iterator It, std::sentinel_for<It> End>
+    void bind_oneshot_arg(SQLite::Statement& st, int& i, const bind_each<It, End>& each) {
+        for (auto it = each.first; it != each.last; ++it)
+            bind_oneshot_single(st, i++, *it);
+    }
+
+    template <typename... T>
+    void bind_oneshot(SQLite::Statement& st, const T&... bind) {
+        int i = 1;
+        (bind_oneshot_arg(st, i, bind), ...);
     }
 }  // namespace detail
 
@@ -197,9 +260,10 @@ namespace detail {
 // empty) or the contained value; variant binds whichever variant value is held.  std::spans of
 // std::byte or unsigned char spans (or types convertible to them) bind as BLOBs containing the
 // contained value.
+// A `bind_each` argument binds each of its elements to a consecutive parameter; see there.
 template <typename... T>
 void bind_oneshot(SQLite::Statement& st, const T&... bind) {
-    detail::bind_oneshot(st, std::make_integer_sequence<int, sizeof...(T)>{}, bind...);
+    detail::bind_oneshot(st, bind...);
 }
 
 // Executes a query that does not expect results.  Optionally binds parameters, if provided.
