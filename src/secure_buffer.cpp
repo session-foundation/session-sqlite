@@ -1,8 +1,10 @@
 #include <sodium/core.h>
 #include <sodium/utils.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <new>
 #include <session/secure_buffer.hpp>
 #include <stdexcept>
 
