@@ -210,6 +210,14 @@ namespace detail {
         requires (sizeof(T) > sizeof(uint32_t))
     void bind_oneshot_single(SQLite::Statement& st, int i, T val) = delete;
 
+    // Binds a scoped enum as its underlying type, so that a type-safe integer enum can be bound
+    // directly rather than having to be cast at every call site.
+    template <typename T>
+        requires std::is_enum_v<T>
+    void bind_oneshot_single(SQLite::Statement& st, int i, T val) {
+        bind_oneshot_single(st, i, static_cast<std::underlying_type_t<T>>(val));
+    }
+
     // Binds an optional<T>: if val is not set this binds a SQL NULL value, otherwise it recurses to
     // bind whatever the value is.
     template <typename T>
@@ -290,15 +298,26 @@ int exec_query(SQLite::Database& db, const std::string& query, const T&... bind)
 // rather than a default-constructed T (since SQLite::Column::operator T() returns 0/empty for
 // NULL values, which would produce a non-empty optional{0} without this special handling).
 namespace detail {
+    // A scoped enum has to be converted via its underlying type: SQLite::Column offers conversion
+    // operators for every fixed-width integer type, so casting one straight to an enum is
+    // ambiguous rather than merely narrowing.
+    template <typename T>
+    T col_to(SQLite::Column&& col) {
+        if constexpr (std::is_enum_v<T>)
+            return static_cast<T>(static_cast<std::underlying_type_t<T>>(std::move(col)));
+        else
+            return static_cast<T>(std::move(col));
+    }
+
     template <typename T, int I>
     T get_col(SQLite::Statement& st) {
         if constexpr (is_optional<T>) {
             auto col = st.getColumn(I);
             if (col.isNull())
                 return std::nullopt;
-            return std::optional{static_cast<typename T::value_type>(std::move(col))};
+            return std::optional{col_to<typename T::value_type>(std::move(col))};
         } else {
-            return static_cast<T>(st.getColumn(I));
+            return col_to<T>(st.getColumn(I));
         }
     }
     template <typename... T, int... Is>
