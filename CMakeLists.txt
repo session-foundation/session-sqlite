@@ -24,7 +24,7 @@ option(SESSION_EXTERNAL_SQLITE_LIBICU "Set to true if using an external SQLite::
 set(is_sqlite_mc FALSE)
 set(is_sqlcipher FALSE)
 if(SESSION_SQLITE_BUILD_SQLITE3MC)
-    if(SQLite::SQLite3)
+    if(TARGET SQLite::SQLite3)
         message(FATAL_ERROR "SESSION_SQLITE_BUILD_SQLITE3MC is defined but there is also a pre-existing SQLite::SQLite3 target; use one or the other!")
     endif()
 
@@ -40,8 +40,10 @@ if(SESSION_SQLITE_BUILD_SQLITE3MC)
 
     set(is_sqlite_mc TRUE)
 
-elseif(NOT TARGET SQLite::SQLite3)
-    message(FATAL_ERROR "Either SESSION_SQLITE_BUILD_SQLITE3MC=ON or an SQLite::SQLite3 target must be defined")
+else()
+    if(NOT TARGET SQLite::SQLite3)
+        message(FATAL_ERROR "Either SESSION_SQLITE_BUILD_SQLITE3MC=ON or an SQLite::SQLite3 target must be defined")
+    endif()
 
     if(SESSION_EXTERNAL_SQLITE_SQLCIPHER)
         if(SESSION_EXTERNAL_SQLITE_MC)
