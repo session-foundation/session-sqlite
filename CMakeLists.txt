@@ -120,7 +120,14 @@ add_library(session_sqlite
 target_compile_features(session_sqlite PUBLIC cxx_std_20)
 target_include_directories(session_sqlite PUBLIC include)
 target_link_libraries(session_sqlite PUBLIC SQLiteCpp fmt session::secure_buffer)
-target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc sqlite_sodium)
+target_link_libraries(session_sqlite PRIVATE sqlite_sodium)
+if(SESSION_SQLITE_BUILD_SQLITE3MC)
+    # Only needed for the sqlite3mc_* cipher configuration calls, which are compiled out unless one
+    # of SESSION_SQLITE_MULTIPLE_CIPHERS/SESSION_SQLITE_SQLCIPHER is set.  With an external
+    # SQLite::SQLite3 there is no sessiondep::sqlite3mc target at all, and SQLiteCpp already carries
+    # the sqlite3 link publicly.
+    target_link_libraries(session_sqlite PRIVATE sessiondep::sqlite3mc)
+endif()
 
 if((SESSION_SQLITE_BUILD_SQLITE3MC AND SQLITE3MC_WITH_LIBICU) OR
     (NOT SESSION_SQLITE_BUILD_SQLITE3MC AND SESSION_EXTERNAL_SQLITE_LIBICU))

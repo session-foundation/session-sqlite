@@ -298,7 +298,7 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
         throw std::runtime_error{
                 "The given encryption type is not supported when using the SQLCipher backend"};
 
-#else
+#elif defined(SESSION_SQLITE_MULTIPLE_CIPHERS)
     // SQLite3 multiple ciphers
     const char* name = nullptr;
     int legacy = -1;
@@ -334,6 +334,12 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
             if (-1 == sqlite3mc_config_cipher(sql.getHandle(), name, "algorithm", algorithm))
                 throw std::runtime_error{"Failed to set cipher algorithm"};
     }
+#else
+    // A stock sqlite3, with no encryption support of any kind compiled in.
+    if (_enc != Encryption::None)
+        throw std::runtime_error{
+                "Encryption was requested, but this session-sqlite was built against a plain "
+                "sqlite3 with no encryption support; rebuild against SQLite3-MC or SQLCipher"};
 #endif
 
     if (_plaintext_header)
@@ -345,10 +351,12 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
     if (_pragma_salt)
         connect_pragma(*_pragma_salt, "set cipher salt");
 
+#if defined(SESSION_SQLITE_SQLCIPHER) || defined(SESSION_SQLITE_MULTIPLE_CIPHERS)
     if (_enc != Encryption::None) {
         auto ro = _key.access();
         sqlite3_key(sql.getHandle(), ro.buf.data(), ro.buf.size());
     }
+#endif
 
     // Now make sure we can query something: this is our failure point (via exception) if the
     // authentication key is incorrect as this will be the first place that an actual read happens.
