@@ -252,7 +252,9 @@ namespace detail {
 
     template <typename... T>
     void bind_oneshot(SQLite::Statement& st, const T&... bind) {
-        int i = 1;
+        // maybe_unused because the fold is empty when there is nothing to bind, which is a
+        // perfectly ordinary call (e.g. a query with no parameters).
+        [[maybe_unused]] int i = 1;
         (bind_oneshot_arg(st, i, bind), ...);
     }
 }  // namespace detail
