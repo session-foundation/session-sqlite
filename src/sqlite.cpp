@@ -13,8 +13,10 @@
 #include <sodium/utils.h>
 #include <sqlite3.h>
 
+#include <cstdint>
 #include <fstream>
 #include <mutex>
+#include <string>
 #include <session/sqlite.hpp>
 #include <stdexcept>
 
@@ -127,6 +129,16 @@ Database::Database(
                 // multiple threads as long as a connection (and any connection-derived objects) are
                 // not used from multiple threads.
                 | SQLite::OPEN_NOMUTEX;
+
+    // A plain ":memory:" gives each connection a database of its own, so the pool making a second
+    // one for another thread would silently hand back an empty database.  Named and shared-cache
+    // instead, so every connection this Database opens reaches the same pages; unique per instance
+    // so two in-memory Databases in one process stay separate.
+    if (_db_path == ":memory:") {
+        _db_path = "file:session-mem-" + std::to_string(reinterpret_cast<uintptr_t>(this)) +
+                   "?mode=memory&cache=shared";
+        _open_flags |= SQLITE_OPEN_URI;
+    }
     _busy_timeout =
             (busy_t_o && busy_t_o->timeout >= 0s) ? busy_t_o->timeout : busy_timeout::DEFAULT;
     _wal = wal_mode ? wal_mode->wal : true;
