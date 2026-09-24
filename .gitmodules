@@ -4,3 +4,6 @@
 [submodule "cmake/session-deps"]
 	path = cmake/session-deps
 	url = https://github.com/session-foundation/session-deps.git
+[submodule "tests/Catch2"]
+	path = tests/Catch2
+	url = https://github.com/catchorg/Catch2.git

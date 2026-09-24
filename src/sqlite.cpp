@@ -419,7 +419,7 @@ StatementWrapper Connection::prepared_st(const std::string& query) {
 }
 
 static const auto item_exists =
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?"s;
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?)"s;
 bool Connection::table_exists(std::string_view table_name) {
     return prepared_get<int>(item_exists, "table"sv, table_name);
 }
