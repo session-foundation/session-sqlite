@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.13...3.25)
 project(session-sqlite
     VERSION 1.0.0
     DESCRIPTION "SQLite C++ extensions and helpers"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 include(cmake/session-deps/Deps.cmake)
 
