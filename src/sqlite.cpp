@@ -131,19 +131,32 @@ Database::Database(
                 // multiple threads as long as a connection (and any connection-derived objects) are
                 // not used from multiple threads.
                 | SQLite::OPEN_NOMUTEX;
+    _busy_timeout =
+            (busy_t_o && busy_t_o->timeout >= 0s) ? busy_t_o->timeout : busy_timeout::DEFAULT;
+    _wal = wal_mode ? wal_mode->wal : true;
 
     // A plain ":memory:" gives every connection its own private database, so pooled connections
     // wouldn't see each other.  A memdb VFS name starting with "/" is shared by all connections
     // that open it, and the counter keeps separate Database instances apart (even one constructed
     // where a destroyed one used to be).
     if (_db_path == ":memory:") {
-        _db_path = "file:/session-sqlite-memdb-" + std::to_string(++memdb_counter) + "?vfs=memdb";
+        // sqlite3mc only wraps the default VFS with its encryption shim, so naming plain memdb would
+        // bypass encryption entirely; asking for "multipleciphers-memdb" makes it create a shim
+        // around memdb on demand.
+        const char* vfs = "memdb";
+#ifdef SESSION_SQLITE_MULTIPLE_CIPHERS
+        if (_enc != Encryption::None)
+            vfs = "multipleciphers-memdb";
+#endif
+        _db_path = "file:/session-sqlite-memdb-" + std::to_string(++memdb_counter) +
+                   "?vfs=" + vfs;
         _open_flags |= SQLite::OPEN_URI;
-    }
 
-    _busy_timeout =
-            (busy_t_o && busy_t_o->timeout >= 0s) ? busy_t_o->timeout : busy_timeout::DEFAULT;
-    _wal = wal_mode ? wal_mode->wal : true;
+        // memdb has no shared memory support, so WAL is impossible.  Plain memdb just refuses the
+        // journal_mode change, but sqlite3mc's shim advertises an xShmMap that forwards to memdb's
+        // NULL one, so enabling WAL through it segfaults on the first read.
+        _wal = false;
+    }
 
     std::optional<std::array<std::byte, 16>> salt;
 
@@ -368,7 +381,11 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
 #if defined(SESSION_SQLITE_SQLCIPHER) || defined(SESSION_SQLITE_MULTIPLE_CIPHERS)
     if (_enc != Encryption::None) {
         auto ro = _key.access();
-        sqlite3_key(sql.getHandle(), ro.buf.data(), ro.buf.size());
+        // A failure here (e.g. a VFS without the encryption shim) would otherwise carry on and
+        // silently give an unencrypted database.
+        if (int rc = sqlite3_key(sql.getHandle(), ro.buf.data(), ro.buf.size()); rc != SQLITE_OK)
+            throw std::runtime_error{
+                    "Failed to set database encryption key: "s + sqlite3_errstr(rc)};
     }
 #endif
 

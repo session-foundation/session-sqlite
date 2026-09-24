@@ -904,8 +904,11 @@ class Database {
     // If `db_path` is set to `:memory:` then this opens an ephemeral, in-memory database that is
     // shared by all of this Database's connections (but not with any other Database instance), and
     // is freed once the Database and all of its Connections are destroyed.  This requires SQLite
-    // 3.36+ (for the memdb VFS).  Note that in-memory databases do not actually apply any
-    // encryption as encryption generally only applies when pages are written to disk.
+    // 3.36+ (for the memdb VFS).  Encryption options apply to in-memory databases as they do to
+    // files: the in-memory database pages are stored encrypted (though, as with any encrypted
+    // database, pages in the connection's page cache are not).  In-memory databases never use WAL
+    // mode (wal_mode is ignored), and you must not enable it yourself (e.g. from post_open): on an
+    // encrypted in-memory database that segfaults due to a sqlite3mc bug.
     template <DatabaseOption... Opt>
     Database(std::filesystem::path db_path, const Opt&... opts) :
             Database{
