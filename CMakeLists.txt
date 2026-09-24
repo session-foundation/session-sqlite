@@ -110,6 +110,12 @@ set(SQLite3_LIBRARY "ignored" CACHE STRING "" FORCE)
 set(SQLITE_ENABLE_COLUMN_METADATA OFF CACHE BOOL "" FORCE)
 set(SQLITE_OMIT_LOAD_EXTENSION ON CACHE BOOL "" FORCE)
 
+# SQLiteCpp defaults to C++11 when no standard is set, which compiles out the std::string_view
+# binding API that we use.  This is a plain (directory-scoped) variable so that it can't leak into a
+# parent project, and a standard set by a parent (or on the command line) takes precedence.
+if(NOT CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 20)
+endif()
 
 add_subdirectory(SQLiteCpp EXCLUDE_FROM_ALL)
 
