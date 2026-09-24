@@ -7,6 +7,14 @@ project(session-sqlite
 
 include(cmake/session-deps/Deps.cmake)
 
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    set(session_sqlite_IS_TOPLEVEL_PROJECT TRUE)
+else()
+    set(session_sqlite_IS_TOPLEVEL_PROJECT FALSE)
+endif()
+
+option(SESSION_SQLITE_BUILD_TESTS "Build session-sqlite test suite" ${session_sqlite_IS_TOPLEVEL_PROJECT})
+
 # We support multiple modes of operation:
 # - building a bundled sqlite3-multiple-ciphers, supporting ChaCha20 and SQLCipher4 databases.  Note
 #   that SQLCipher4 support will be slower than full SQLCipher4 and is mainly provided so that you
@@ -155,3 +163,7 @@ if(SESSION_SQLITE_ENCRYPT)
 endif()
 
 add_library(session::SQLite ALIAS session_sqlite)
+
+if(SESSION_SQLITE_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
