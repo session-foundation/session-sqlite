@@ -901,9 +901,11 @@ class Database {
     //
     // The database is created at the given path, creating it if it does not exist.
     //
-    // If `db_path` is set to `:memory:` then this opens an ephemeral, in-memory database.  Note
-    // that in-memory databases do not actually apply any encryption as encryption generally only
-    // applies when pages are written to disk.
+    // If `db_path` is set to `:memory:` then this opens an ephemeral, in-memory database that is
+    // shared by all of this Database's connections (but not with any other Database instance), and
+    // is freed once the Database and all of its Connections are destroyed.  This requires SQLite
+    // 3.36+ (for the memdb VFS).  Note that in-memory databases do not actually apply any
+    // encryption as encryption generally only applies when pages are written to disk.
     template <DatabaseOption... Opt>
     Database(std::filesystem::path db_path, const Opt&... opts) :
             Database{

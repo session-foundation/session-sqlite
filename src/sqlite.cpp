@@ -13,6 +13,8 @@
 #include <sodium/utils.h>
 #include <sqlite3.h>
 
+#include <atomic>
+#include <cstdint>
 #include <fstream>
 #include <mutex>
 #include <session/sqlite.hpp>
@@ -46,6 +48,8 @@ static std::string to_hex(std::span<const std::byte> bytes) {
 }
 
 using namespace std::literals;
+
+static std::atomic<uint64_t> memdb_counter{0};
 
 bool enabled(Encryption type) {
     switch (type) {
@@ -127,6 +131,16 @@ Database::Database(
                 // multiple threads as long as a connection (and any connection-derived objects) are
                 // not used from multiple threads.
                 | SQLite::OPEN_NOMUTEX;
+
+    // A plain ":memory:" gives every connection its own private database, so pooled connections
+    // wouldn't see each other.  A memdb VFS name starting with "/" is shared by all connections
+    // that open it, and the counter keeps separate Database instances apart (even one constructed
+    // where a destroyed one used to be).
+    if (_db_path == ":memory:") {
+        _db_path = "file:/session-sqlite-memdb-" + std::to_string(++memdb_counter) + "?vfs=memdb";
+        _open_flags |= SQLite::OPEN_URI;
+    }
+
     _busy_timeout =
             (busy_t_o && busy_t_o->timeout >= 0s) ? busy_t_o->timeout : busy_timeout::DEFAULT;
     _wal = wal_mode ? wal_mode->wal : true;

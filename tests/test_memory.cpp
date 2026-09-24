@@ -17,6 +17,23 @@ TEST_CASE("In-memory database is shared across connections", "[memory]") {
     CHECK(c2.prepared_get<int>("SELECT x FROM foo") == 42);
 }
 
+TEST_CASE("Encrypted in-memory database is shared across connections", "[memory]") {
+    if (!enabled(Encryption::AEGIS256))
+        SKIP("AEGIS256 not supported by this build");
+
+    std::array<std::byte, 32> key;
+    key.fill(std::byte{0x42});
+    Database db{":memory:", Encryption::AEGIS256, raw_key{key}};
+
+    auto c1 = db.conn();
+    c1.sql.exec("CREATE TABLE foo (x INTEGER)");
+    c1.sql.exec("INSERT INTO foo VALUES (42)");
+
+    auto c2 = db.unique_conn();
+    REQUIRE(c2.table_exists("foo"));
+    CHECK(c2.prepared_get<int>("SELECT x FROM foo") == 42);
+}
+
 TEST_CASE("Separate in-memory databases are independent", "[memory]") {
     Database db1{":memory:"};
     Database db2{":memory:"};
