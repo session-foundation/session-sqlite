@@ -1099,12 +1099,12 @@ class Connection {
 
     /// Prepares a query, caching it, and returns a wrapper that automatically resets the
     /// prepared statement on destruction.
-    StatementWrapper prepared_st(const std::string& query);
+    StatementWrapper prepared_st(std::string_view query);
 
     /// Prepares (with caching) and binds a query, returning the active statement handle.  Like
     /// `prepared_st` the wrapper resets the prepared statement on destruction.
     template <typename... T>
-    StatementWrapper prepared_bind(const std::string& query, const T&... bind) {
+    StatementWrapper prepared_bind(std::string_view query, const T&... bind) {
         auto st = prepared_st(query);
         bind_oneshot(st, bind...);
         return st;
@@ -1114,14 +1114,14 @@ class Connection {
     /// through results where each row is a T or tuple<T...>:
     template <typename... T, typename... Bind>
         requires(sizeof...(T) != 0)
-    IterableStatementWrapper<T...> prepared_results(const std::string& query, const Bind&... bind) {
+    IterableStatementWrapper<T...> prepared_results(std::string_view query, const Bind&... bind) {
         return IterableStatementWrapper<T...>{prepared_bind(query, bind...)};
     }
 
     /// Prepares (with caching) a query that returns no rows and then executes it, optionally
     /// binding the given parameters when executing.  Throws if the query fails or returns any rows.
     template <typename... T>
-    int prepared_exec(const std::string& query, const T&... bind) {
+    int prepared_exec(std::string_view query, const T&... bind) {
         return exec_query(prepared_st(query), bind...);
     }
 
@@ -1130,7 +1130,7 @@ class Connection {
     /// than 1 rows.
     template <typename... T, typename... Bind>
         requires(!(holds_blob_view<Bind> || ...))
-    auto prepared_get(const std::string& query, const Bind&... bind) {
+    auto prepared_get(std::string_view query, const Bind&... bind) {
         return exec_and_get<T...>(prepared_st(query), bind...);
     }
 
@@ -1139,7 +1139,7 @@ class Connection {
     /// rows. Throws if the query returns more than 1 rows.
     template <typename... T, typename... Bind>
         requires(!(holds_blob_view<Bind> || ...))
-    auto prepared_maybe_get(const std::string& query, const Bind&... bind) {
+    auto prepared_maybe_get(std::string_view query, const Bind&... bind) {
         return exec_and_maybe_get<T...>(prepared_st(query), bind...);
     }
 

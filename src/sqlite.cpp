@@ -445,7 +445,7 @@ Database::~Database() {
     assert(_conn_in_use.empty());
 }
 
-StatementWrapper Connection::prepared_st(const std::string& query) {
+StatementWrapper Connection::prepared_st(std::string_view query) {
     return _conn->prepared_st(query);
 }
 

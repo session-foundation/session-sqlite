@@ -4,7 +4,7 @@
 
 namespace session::sqlite::detail {
 
-StatementWrapper conn::prepared_st(const std::string& query) {
+StatementWrapper conn::prepared_st(std::string_view query) {
     // If you hit this assert hang your head in shame for not following the ridiculous number of
     // times you have been told not to use a Connection across threads:
     assert(std::this_thread::get_id() == _thread);
@@ -14,7 +14,8 @@ StatementWrapper conn::prepared_st(const std::string& query) {
         st = std::move(it->second.back());
         it->second.pop_back();
     } else {
-        st = std::make_unique<SQLite::Statement>(sql, query, SQLite::PREPARE_PERSISTENT);
+        st = std::make_unique<SQLite::Statement>(
+                sql, std::string{query}, SQLite::PREPARE_PERSISTENT);
     }
 
     return {*this, std::move(st)};
