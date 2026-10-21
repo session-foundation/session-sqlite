@@ -3,7 +3,9 @@
 #include <SQLiteCpp/Database.h>
 #include <SQLiteCpp/SQLiteCpp.h>
 
+#include <chrono>
 #include <concepts>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -758,6 +760,12 @@ concept DatabaseBehaviourOption =
 template <typename T>
 concept DatabaseOption = DatabaseEncryptOption<T> || DatabaseBehaviourOption<T>;
 
+/// Thrown by `Database::conn()` and `Database::unique_conn()` while the database is suspended (see
+/// `Database::suspend()`).  Retriable: the same call succeeds once `Database::resume()` is called.
+struct database_suspended : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 /// Database connection managing class.  This class operates as a sort of thread-safe SQLite3
 /// connection pool where each thread gets its own connection as needed so that multiple threads do
 /// not block each other's queries.
@@ -827,6 +835,7 @@ class Database {
     std::function<void(Connection&)> _post_open;
     std::chrono::milliseconds _busy_timeout;
     bool _wal = true;
+    bool _memory = false;
 
     // Connection containers.  When a thread "checks out" a container, we return from the in_use
     // container if the thread already has a connection.  Otherwise we either remove one from unused
@@ -848,6 +857,31 @@ class Database {
     int _conn_max_idle = -1;
     Connection get_or_make_conn(std::thread::id tid, int extra_open_flags = 0);
     std::mutex _conn_mutex;
+
+    // Opens and sets up a new connection, outside the pool and without `_post_open`.  Touches no
+    // pool state, so needs no pool lock - but it reads `_key`, whose buffer unlocks and relocks its
+    // memory around each read with a plain counter, so two opens at once take `_key_mutex`.
+    std::shared_ptr<detail::conn> open_conn(
+            int extra_open_flags, std::chrono::milliseconds busy_timeout);
+    std::mutex _key_mutex;
+
+    // Set by `suspend()`, cleared by `resume()`.  `_conn_cv` is notified whenever a connection is
+    // returned and on resume: a suspend waiting for held connections waits on it, and so does a
+    // held thread waiting for the resume.
+    bool _suspended = false;
+    std::condition_variable _conn_cv;
+    std::function<void()> _on_refused;
+    std::vector<std::thread::id> _held;
+    std::function<void(std::chrono::milliseconds)> _on_hold;
+    std::chrono::milliseconds _hold_interval{std::chrono::seconds{30}};
+
+    // Returns once the database is not suspended: at once if it is not, after the resume on a held
+    // thread, and otherwise throws `database_suspended`, after telling `_on_refused`.  Called with
+    // `_conn_mutex` held through `lock`.
+    void wait_while_suspended(std::unique_lock<std::mutex>& lock);
+
+    // Whether a connection that has just been returned stays open in the idle pool.
+    bool keep_idle() const;
 
     friend class Connection;
     // Called by Connection after releasing a backend connection to have us rescan for any
@@ -949,6 +983,74 @@ class Database {
     // If there are already more than this number of idle connections then this closes the extras
     // so that the given limit now applies.
     void set_max_idle_conns(int max_idle);
+
+    // What `suspend()` managed within its wait.
+    struct suspend_result {
+        // Every connection was closed, so the process holds no lock on the database files.  False
+        // when a held connection was not returned in time, or `resume()` was called meanwhile.
+        bool closed = false;
+        // The WAL was checkpointed and truncated.  Only attempted when asked for, and only once
+        // every connection was closed.
+        bool checkpointed = false;
+    };
+
+    // Stops the database being used until `resume()`, and closes every connection so the process
+    // holds no lock on its files: iOS kills a suspended app that holds a lock on a file in a shared
+    // container.
+    //
+    // From this call on, `conn()` and `unique_conn()` throw `database_suspended` -- except to a
+    // thread already holding a connection, which keeps it so that it can finish what it started,
+    // and to a thread registered with `hold_while_suspended()`, which waits for `resume()`.
+    // Idle connections close at once, and this waits up to `wait` for the held ones to be returned,
+    // each closing as it is.  With `interrupt`, for when there is no time left to wait, the
+    // statements running on held connections are interrupted first: an interrupted statement
+    // throws on its own thread, where the transaction's RAII rollback runs.
+    //
+    // With `checkpoint`, once every connection is closed one is opened just long enough to
+    // checkpoint and truncate the WAL, within what remains of `wait`.  Closing the last connection
+    // to a database does that by itself; this is for when another process -- an app's extension --
+    // still has the database open, so that this process closing is not the last.
+    //
+    // An in-memory database keeps one idle connection open, since closing the last would discard
+    // it; having no files, it holds no lock either way.
+    suspend_result suspend(
+            std::chrono::milliseconds wait, bool interrupt = false, bool checkpoint = false);
+
+    // Allows connections again after `suspend()`.  They reopen on the next `conn()`, not here.
+    void resume();
+
+    // Whether the database is suspended.
+    bool suspended();
+
+    // Called, on the refused thread, each time `conn()` or `unique_conn()` refuses a connection
+    // because the database is suspended, just before throwing: work while suspended is a bug in
+    // whatever forgot to resume, and this is where to make it loud.  Called with the pool's lock
+    // held, so it must not touch the database.
+    void on_refused(std::function<void()> f);
+
+    // Makes `conn()` and `unique_conn()` on thread `tid` wait while the database is suspended,
+    // until `resume()`, rather than throw.  For a thread whose work cannot all be stopped at a
+    // suspend -- an event loop with jobs already queued, or answers still to arrive -- and is
+    // better paused than failed: the job carries on once resumed, or never finishes if the process
+    // is killed meanwhile, which a suspend has to allow for anyway.  A held thread waits with no
+    // limit, so the database must be resumed before it is destroyed.
+    void hold_while_suspended(std::thread::id tid);
+
+    // Undoes `hold_while_suspended()`, for a thread that is ending: its id may be reused.
+    void stop_holding(std::thread::id tid);
+
+    // Called on a held thread when it begins waiting for a resume, with 0, and again every
+    // `interval` that it is still waiting, with how long it has waited.  Only time the process was
+    // running counts: a wake far past its deadline is taken as the process having been frozen, as
+    // iOS freezes a suspended app, and that stretch is neither counted nor reported.  Called with
+    // the pool's lock held, so it must not touch the database.
+    void on_hold(
+            std::function<void(std::chrono::milliseconds waited)> f,
+            std::chrono::milliseconds interval = std::chrono::seconds{30});
+
+    // How many connections are open, idle and in use together: what a suspend that closed every
+    // connection leaves at zero (one, for an in-memory database).
+    size_t open_connections();
 
     // Gets a connection.  If the current thread already has a connection checked out, this returns
     // a Connection object that shared connection ownership with the other connection.
