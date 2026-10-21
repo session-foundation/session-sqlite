@@ -1097,6 +1097,29 @@ class Connection {
     // The SQLiteCpp instance to actually interact with the sqlite3 db.
     SQLite::Database& sql;
 
+    /// Begins a deferred transaction, which takes no lock until a statement in it needs one.  For a
+    /// transaction that only reads: one that may write wants `begin_immediate()`.
+    [[nodiscard]] SQLite::Transaction begin() {
+        return SQLite::Transaction{sql, SQLite::TransactionBehavior::DEFERRED};
+    }
+
+    /// Begins a transaction that takes the database's write lock at BEGIN, which is what a
+    /// transaction that may write wants - even one whose first statement is a write, so that being
+    /// safe does not hang on statement order.
+    ///
+    /// In WAL mode a deferred transaction reads from a snapshot and asks for the write lock only at
+    /// its first write.  If another connection - another process, or another connection in this
+    /// one - has committed since that snapshot was taken, the write then fails at once with
+    /// SQLITE_BUSY, and the busy timeout does not help: no amount of waiting makes a stale snapshot
+    /// current.  Taking the lock at BEGIN takes the snapshot with it, so contention becomes the busy
+    /// timeout's to wait out.
+    ///
+    /// The lock keeps every other writer on the file waiting until the transaction ends, so what
+    /// runs inside should be the writes and the reads that decide them.  Readers are not blocked.
+    [[nodiscard]] SQLite::Transaction begin_immediate() {
+        return SQLite::Transaction{sql, SQLite::TransactionBehavior::IMMEDIATE};
+    }
+
     /// Prepares a query, caching it, and returns a wrapper that automatically resets the
     /// prepared statement on destruction.
     StatementWrapper prepared_st(std::string_view query);
