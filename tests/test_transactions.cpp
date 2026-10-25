@@ -432,6 +432,86 @@ TEST_CASE(
     CHECK(c.prepared_get<int>("SELECT count(*) FROM foo") == 2);
 }
 
+TEST_CASE("begin_immediate waits for the timeout it is given", "[transactions]") {
+    TempPath tmp;
+
+    // Throws SQLITE_BUSY from `f`, returning how long it took
+    auto busy_after = [](auto&& f) {
+        auto start = std::chrono::steady_clock::now();
+        try {
+            f();
+            FAIL("got the write lock while it was held");
+        } catch (const SQLite::Exception& e) {
+            CHECK(is_busy(e));
+        }
+        return std::chrono::steady_clock::now() - start;
+    };
+
+    // Holds the write lock through `db` from another thread until destroyed
+    struct Holder {
+        std::promise<void> holding, done;
+        std::thread thread;
+        Holder(Database& db, std::chrono::milliseconds hold = 1h) {
+            thread = std::thread{[this, &db, hold] {
+                auto c = db.conn();
+                auto tx = c.begin_immediate();
+                holding.set_value();
+                done.get_future().wait_for(hold);
+            }};
+            holding.get_future().wait();
+        }
+        ~Holder() {
+            done.set_value();
+            thread.join();
+        }
+    };
+
+    SECTION("shorter than the busy timeout") {
+        Database db{tmp.path, busy_timeout{5s}};
+        Holder holder{db};
+        auto c = db.conn();
+        auto waited = busy_after([&] { (void)c.begin_immediate(100ms); });
+        CHECK(waited >= 100ms);
+        CHECK(waited < 1s);
+    }
+    SECTION("longer than the busy timeout") {
+        Database db{tmp.path, busy_timeout{100ms}};
+        Holder holder{db, 300ms};
+        auto c = db.conn();
+        auto tx = c.begin_immediate(5s);
+        tx.commit();
+    }
+    SECTION("0, taking the lock only if it is free now") {
+        Database db{tmp.path, busy_timeout{5s}};
+        auto c = db.conn();
+        c.begin_immediate(0ms).commit();
+        Holder holder{db};
+        CHECK(busy_after([&] { (void)c.begin_immediate(0ms); }) < 50ms);
+    }
+    SECTION("while another process holds the lock") {
+        Database db{tmp.path, busy_timeout{1s}};
+        db.conn().sql.exec("CREATE TABLE foo (x INTEGER)");
+        auto c = db.conn();
+        OutsideWriter outside{tmp.path};
+        auto waited = busy_after([&] { (void)c.begin_immediate(200ms); });
+        CHECK(waited >= 200ms);
+        CHECK(waited < 800ms);
+        CHECK(busy_after([&] { (void)c.begin_immediate(0ms); }) < 50ms);
+        // The connection's own busy timeout is back for anything after
+        CHECK(busy_after([&] { c.sql.exec("INSERT INTO foo VALUES (1)"); }) >= 900ms);
+    }
+    SECTION("in prepared_exec_immediate") {
+        Database db{tmp.path, busy_timeout{5s}};
+        db.conn().sql.exec("CREATE TABLE foo (x INTEGER)");
+        Holder holder{db};
+        auto c = db.conn();
+        auto waited = busy_after(
+                [&] { c.prepared_exec_immediate(100ms, "INSERT INTO foo VALUES (?)", 1); });
+        CHECK(waited >= 100ms);
+        CHECK(waited < 1s);
+    }
+}
+
 TEST_CASE("prepared_exec_immediate writes in a begin_immediate transaction", "[transactions]") {
     TempPath tmp;
     Database db{tmp.path, busy_timeout{0ms}};

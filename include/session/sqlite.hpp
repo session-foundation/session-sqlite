@@ -1129,7 +1129,8 @@ class ImmediateTransaction {
     std::chrono::steady_clock::time_point _requested, _acquired;
 
     friend class Connection;
-    ImmediateTransaction(Database& db, detail::conn& conn);
+    ImmediateTransaction(
+            Database& db, detail::conn& conn, std::optional<std::chrono::milliseconds> timeout);
 
     void finish();
 
@@ -1185,16 +1186,18 @@ class Connection {
     ///
     /// begin_immediate() callers on the same Database get the lock in the order they asked for it.
     /// Writes made any other way, in this process or another, don't queue with them, and are
-    /// waited out with SQLite's busy handler.  The busy timeout bounds the whole wait, after which
-    /// this throws a SQLite::Exception with SQLITE_BUSY.  It throws one with SQLITE_MISUSE if this
-    /// thread already has a begin_immediate() transaction open on this Database.
+    /// waited out with SQLite's busy handler.  `timeout`, or the Database's busy timeout if it is
+    /// not given, bounds the whole wait, after which this throws a SQLite::Exception with
+    /// SQLITE_BUSY; 0 takes the lock only if it is free now.  It throws one with SQLITE_MISUSE if
+    /// this thread already has a begin_immediate() transaction open on this Database.
     ///
     /// The lock keeps every other writer on the file waiting until the transaction ends, so what
     /// runs inside should be the writes and the reads that decide them.  Readers are not blocked.
     ///
     /// Set `PRAGMA wal_autocheckpoint`, if at all, from `post_open`: set on a connection later, it
     /// makes the automatic checkpoint run inside COMMIT, with every queued writer waiting for it.
-    [[nodiscard]] ImmediateTransaction begin_immediate();
+    [[nodiscard]] ImmediateTransaction begin_immediate(
+            std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
     /// Prepares a query, caching it, and returns a wrapper that automatically resets the
     /// prepared statement on destruction.
@@ -1231,6 +1234,16 @@ class Connection {
     template <typename... T>
     int prepared_exec_immediate(std::string_view query, const T&... bind) {
         auto tx = begin_immediate();
+        int changes = prepared_exec(query, bind...);
+        tx.commit();
+        return changes;
+    }
+
+    /// The same, waiting at most `timeout` for the write lock, as begin_immediate(timeout) does.
+    template <typename... T>
+    int prepared_exec_immediate(
+            std::chrono::milliseconds timeout, std::string_view query, const T&... bind) {
+        auto tx = begin_immediate(timeout);
         int changes = prepared_exec(query, bind...);
         tx.commit();
         return changes;

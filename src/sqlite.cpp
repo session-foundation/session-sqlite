@@ -493,7 +493,8 @@ bool detail::fifo_lock::held_by_this_thread() {
     return _held && _owner == std::this_thread::get_id();
 }
 
-ImmediateTransaction::ImmediateTransaction(Database& db, detail::conn& conn) :
+ImmediateTransaction::ImmediateTransaction(
+        Database& db, detail::conn& conn, std::optional<std::chrono::milliseconds> timeout) :
         _db{db}, _conn{conn} {
     auto& sql = conn.sql;
     if (db._write_lock.held_by_this_thread())
@@ -502,36 +503,38 @@ ImmediateTransaction::ImmediateTransaction(Database& db, detail::conn& conn) :
                 "write lock in another begin_immediate() transaction",
                 SQLITE_MISUSE};
 
+    const auto budget = timeout ? std::max(*timeout, 0ms) : db._busy_timeout;
     _requested = std::chrono::steady_clock::now();
-    const auto deadline = _requested + db._busy_timeout;
+    const auto deadline = _requested + budget;
     if (!db._write_lock.lock_until(deadline))
         throw SQLite::Exception{"database is locked", SQLITE_BUSY};
 
-    // The busy timeout bounds the whole call, so BEGIN's busy handler gets only what waiting for
-    // _write_lock left of it.  A timeout of 0 means the connection has no busy handler at all, and
-    // setting one of 0 would remove it, so what is left is never less than 1ms.
-    const int full = static_cast<int>(db._busy_timeout.count());
-    int left = full;
-    if (full > 0)
+    // The budget bounds the whole call, so BEGIN's busy handler gets only what waiting for
+    // _write_lock left of it, and the connection has its usual busy timeout back afterwards.  A
+    // busy timeout of 0 means not waiting at all, so what is left of any other budget is never
+    // less than 1ms.
+    const int usual = static_cast<int>(db._busy_timeout.count());
+    int left = 0;
+    if (budget > 0ms)
         left = std::clamp(
                 static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(
                                          deadline - std::chrono::steady_clock::now())
                                          .count()),
                 1,
-                full);
+                static_cast<int>(budget.count()));
     auto* handle = sql.getHandle();
-    if (left != full)
+    if (left != usual)
         sqlite3_busy_timeout(handle, left);
     try {
         _tx.emplace(sql, SQLite::TransactionBehavior::IMMEDIATE);
     } catch (...) {
-        if (left != full)
-            sqlite3_busy_timeout(handle, full);
+        if (left != usual)
+            sqlite3_busy_timeout(handle, usual);
         db._write_lock.unlock();
         throw;
     }
-    if (left != full)
-        sqlite3_busy_timeout(handle, full);
+    if (left != usual)
+        sqlite3_busy_timeout(handle, usual);
     conn.in_immediate = true;
     _acquired = std::chrono::steady_clock::now();
 }
@@ -579,8 +582,8 @@ void ImmediateTransaction::rollback() {
     finish();
 }
 
-ImmediateTransaction Connection::begin_immediate() {
-    return ImmediateTransaction{db, *_conn};
+ImmediateTransaction Connection::begin_immediate(std::optional<std::chrono::milliseconds> timeout) {
+    return ImmediateTransaction{db, *_conn, timeout};
 }
 
 StatementWrapper Connection::prepared_st(std::string_view query) {
