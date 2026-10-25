@@ -876,6 +876,8 @@ class Database {
     // to the next in line as soon as it is free, rather than in SQLite's busy handler, which
     // sleeps and polls.
     detail::fifo_lock _write_lock;
+    std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> _write_lock_observer;
+    std::chrono::nanoseconds _write_lock_observer_threshold{};
 
     friend class Connection;
     friend class ImmediateTransaction;
@@ -978,6 +980,16 @@ class Database {
     // If there are already more than this number of idle connections then this closes the extras
     // so that the given limit now applies.
     void set_max_idle_conns(int max_idle);
+
+    // Sets a function to be told, as each begin_immediate() transaction ends whose wait for the
+    // write lock (in this process's queue and in SQLite's busy handler together) and time holding
+    // it add up to at least `threshold`, how long it spent on each, for finding write contention.
+    // It is called from the thread that held the lock, after releasing it, and must not throw.
+    // This must be set before the first begin_immediate(): it is not synchronized with them.
+    void set_write_lock_observer(
+            std::chrono::nanoseconds threshold,
+            std::function<void(std::chrono::nanoseconds waited, std::chrono::nanoseconds held)>
+                    observer);
 
     // Gets a connection.  If the current thread already has a connection checked out, this returns
     // a Connection object that shared connection ownership with the other connection.
@@ -1113,6 +1125,7 @@ class ImmediateTransaction {
     Database& _db;
     // Engaged exactly while this holds the Database's _write_lock
     std::optional<SQLite::Transaction> _tx;
+    std::chrono::steady_clock::time_point _requested, _acquired;
 
     friend class Connection;
     ImmediateTransaction(Database& db, SQLite::Database& sql);

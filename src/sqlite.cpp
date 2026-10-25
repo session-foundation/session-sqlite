@@ -495,7 +495,8 @@ ImmediateTransaction::ImmediateTransaction(Database& db, SQLite::Database& sql) 
                 "write lock in another begin_immediate() transaction",
                 SQLITE_MISUSE};
 
-    const auto deadline = std::chrono::steady_clock::now() + db._busy_timeout;
+    _requested = std::chrono::steady_clock::now();
+    const auto deadline = _requested + db._busy_timeout;
     if (!db._write_lock.lock_until(deadline))
         throw SQLite::Exception{"database is locked", SQLITE_BUSY};
 
@@ -524,6 +525,7 @@ ImmediateTransaction::ImmediateTransaction(Database& db, SQLite::Database& sql) 
     }
     if (left != full)
         sqlite3_busy_timeout(handle, full);
+    _acquired = std::chrono::steady_clock::now();
 }
 
 ImmediateTransaction::~ImmediateTransaction() {
@@ -533,7 +535,17 @@ ImmediateTransaction::~ImmediateTransaction() {
 
 void ImmediateTransaction::finish() {
     _tx.reset();
+    const auto released = std::chrono::steady_clock::now();
     _db._write_lock.unlock();
+    if (_db._write_lock_observer && released - _requested >= _db._write_lock_observer_threshold)
+        _db._write_lock_observer(_acquired - _requested, released - _acquired);
+}
+
+void Database::set_write_lock_observer(
+        std::chrono::nanoseconds threshold,
+        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> observer) {
+    _write_lock_observer_threshold = threshold;
+    _write_lock_observer = std::move(observer);
 }
 
 void ImmediateTransaction::commit() {

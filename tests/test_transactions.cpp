@@ -212,6 +212,75 @@ TEST_CASE("begin_immediate serves waiting threads in the order they arrived", "[
     CHECK(order == std::vector{1, 2, 3, 0});
 }
 
+TEST_CASE(
+        "the write lock observer is told how long slow transactions waited and held",
+        "[transactions]") {
+    TempPath tmp;
+    Database db{tmp.path};
+    db.conn().sql.exec("CREATE TABLE foo (x INTEGER)");
+
+    std::mutex reports_mutex;
+    std::vector<std::pair<std::chrono::nanoseconds, std::chrono::nanoseconds>> reports;
+    db.set_write_lock_observer(50ms, [&](auto waited, auto held) {
+        std::lock_guard lock{reports_mutex};
+        reports.emplace_back(waited, held);
+    });
+
+    // Neither waits nor holds for long enough to be reported
+    db.conn().begin_immediate().commit();
+
+    std::promise<void> holding;
+    std::thread holder{[&] {
+        auto c = db.conn();
+        auto tx = c.begin_immediate();
+        holding.set_value();
+        std::this_thread::sleep_for(100ms);
+        tx.commit();
+    }};
+    holding.get_future().wait();
+    {
+        auto c = db.conn();
+        auto tx = c.begin_immediate();
+        // Reported even when rolled back by destruction
+    }
+    holder.join();
+
+    REQUIRE(reports.size() == 2);
+    // The two threads report after releasing the lock, so in either order
+    if (reports[0].second < reports[1].second)
+        std::swap(reports[0], reports[1]);
+    auto& [holder_waited, holder_held] = reports[0];
+    auto& [waiter_waited, waiter_held] = reports[1];
+    CHECK(holder_waited < 50ms);
+    CHECK(holder_held >= 100ms);
+    CHECK(waiter_waited >= 50ms);
+    CHECK(waiter_held < 50ms);
+
+    // Reported for the two together reaching the threshold, though neither does alone; the
+    // holder, with only its 30ms hold, is not.
+    reports.clear();
+    std::promise<void> holding2;
+    std::thread holder2{[&] {
+        auto c = db.conn();
+        auto tx = c.begin_immediate();
+        holding2.set_value();
+        std::this_thread::sleep_for(30ms);
+        tx.commit();
+    }};
+    holding2.get_future().wait();
+    {
+        auto c = db.conn();
+        auto tx = c.begin_immediate();
+        std::this_thread::sleep_for(30ms);
+        tx.commit();
+    }
+    holder2.join();
+    REQUIRE(reports.size() == 1);
+    CHECK(reports[0].first < 50ms);
+    CHECK(reports[0].second < 50ms);
+    CHECK(reports[0].first + reports[0].second >= 50ms);
+}
+
 TEST_CASE("begin_immediate throws SQLITE_BUSY when the busy timeout runs out", "[transactions]") {
     TempPath tmp;
     Database db{tmp.path, busy_timeout{200ms}};
