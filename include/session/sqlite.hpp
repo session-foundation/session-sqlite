@@ -3,9 +3,13 @@
 #include <SQLiteCpp/Database.h>
 #include <SQLiteCpp/SQLiteCpp.h>
 
+#include <chrono>
 #include <concepts>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <mutex>
@@ -739,6 +743,24 @@ namespace detail {
     // Internal class holding a single sqlite connection.
     class conn;
 
+    // A lock that serves its waiters in the order they arrived.  A std::mutex lets the thread that
+    // releases it take it straight back if it asks again at once, which a thread doing a series
+    // of transactions always does, ahead of a waiter that has only just been woken.
+    class fifo_lock {
+        std::mutex _mutex;
+        std::condition_variable _cv;
+        std::deque<uint64_t> _queue;
+        uint64_t _next_ticket = 0;
+        bool _held = false;
+        std::thread::id _owner;
+
+      public:
+        // Waits for the lock until `deadline`; returns false if it is not this caller's by then.
+        bool lock_until(std::chrono::steady_clock::time_point deadline);
+        void unlock();
+        bool held_by_this_thread();
+    };
+
 }  // namespace detail
 
 template <typename T>
@@ -849,7 +871,14 @@ class Database {
     Connection get_or_make_conn(std::thread::id tid, int extra_open_flags = 0);
     std::mutex _conn_mutex;
 
+    // Held by an ImmediateTransaction from before its BEGIN until SQLite has released the write
+    // lock, so that this process's begin_immediate() callers wait here, where the lock is handed
+    // to the next in line as soon as it is free, rather than in SQLite's busy handler, which
+    // sleeps and polls.
+    detail::fifo_lock _write_lock;
+
     friend class Connection;
+    friend class ImmediateTransaction;
     // Called by Connection after releasing a backend connection to have us rescan for any
     // now-unused connections in _conn_in_use.
     void conn_returned();
@@ -1074,6 +1103,32 @@ class IterableStatementWrapper : StatementWrapper {
     iterator end() { return iterator{*this, true}; }
 };
 
+/// The transaction returned by Connection::begin_immediate(), used like a SQLite::Transaction:
+/// commit() keeps the changes, and destroying it without committing rolls them back.
+///
+/// It also holds its Database's in-process write lock, and releases it only once SQLite has
+/// released the write lock: after a commit() or rollback() succeeds, or when destroyed.  A commit()
+/// that throws leaves the transaction open, so both locks stay held until it is destroyed.
+class ImmediateTransaction {
+    Database& _db;
+    // Engaged exactly while this holds the Database's _write_lock
+    std::optional<SQLite::Transaction> _tx;
+
+    friend class Connection;
+    ImmediateTransaction(Database& db, SQLite::Database& sql);
+
+    void finish();
+
+  public:
+    ImmediateTransaction(const ImmediateTransaction&) = delete;
+    ImmediateTransaction& operator=(const ImmediateTransaction&) = delete;
+
+    ~ImmediateTransaction();
+
+    void commit();
+    void rollback();
+};
+
 // This is the per-thread shared connection class returned by Database::conn().  While held this
 // connection is reserved for the single thread to which it was requested, and must not be used in
 // any other thread.
@@ -1111,14 +1166,24 @@ class Connection {
     /// its first write.  If another connection - another process, or another connection in this
     /// one - has committed since that snapshot was taken, the write then fails at once with
     /// SQLITE_BUSY, and the busy timeout does not help: no amount of waiting makes a stale snapshot
-    /// current.  Taking the lock at BEGIN takes the snapshot with it, so contention becomes the busy
-    /// timeout's to wait out.
+    /// current.  Taking the lock at BEGIN takes the snapshot with it, so contention becomes a wait
+    /// for the lock instead.
+    ///
+    /// begin_immediate() callers on the same Database get the lock in the order they asked for it.
+    /// Writes made any other way, in this process or another, don't queue with them, and are
+    /// waited out with SQLite's busy handler.  The busy timeout bounds the whole wait, after which
+    /// this throws a SQLite::Exception with SQLITE_BUSY.  It throws one with SQLITE_MISUSE if this
+    /// thread already has a begin_immediate() transaction open on this Database.
     ///
     /// The lock keeps every other writer on the file waiting until the transaction ends, so what
     /// runs inside should be the writes and the reads that decide them.  Readers are not blocked.
-    [[nodiscard]] SQLite::Transaction begin_immediate() {
-        return SQLite::Transaction{sql, SQLite::TransactionBehavior::IMMEDIATE};
-    }
+    ///
+    /// That includes SQLite's automatic WAL checkpoint, which runs inside the COMMIT of whichever
+    /// transaction takes the WAL past its threshold, so every other begin_immediate() caller waits
+    /// for it.  A process with a steady flow of writes should turn it off (`PRAGMA
+    /// wal_autocheckpoint = 0` on each connection) and run `PRAGMA wal_checkpoint(PASSIVE)`
+    /// periodically from somewhere that is not holding up a writer.
+    [[nodiscard]] ImmediateTransaction begin_immediate();
 
     /// Prepares a query, caching it, and returns a wrapper that automatically resets the
     /// prepared statement on destruction.

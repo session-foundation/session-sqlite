@@ -13,7 +13,9 @@
 #include <sodium/utils.h>
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <mutex>
@@ -443,6 +445,116 @@ Connection Database::conn() {
 
 Database::~Database() {
     assert(_conn_in_use.empty());
+}
+
+bool detail::fifo_lock::lock_until(std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock lock{_mutex};
+    if (!_held && _queue.empty()) {
+        _held = true;
+        _owner = std::this_thread::get_id();
+        return true;
+    }
+    const auto ticket = _next_ticket++;
+    _queue.push_back(ticket);
+    if (_cv.wait_until(lock, deadline, [&] { return !_held && _queue.front() == ticket; })) {
+        _queue.pop_front();
+        _held = true;
+        _owner = std::this_thread::get_id();
+        return true;
+    }
+    // Giving up a place at the front can let the next in line go, if the lock is free.
+    const bool was_front = _queue.front() == ticket;
+    _queue.erase(std::find(_queue.begin(), _queue.end(), ticket));
+    lock.unlock();
+    if (was_front)
+        _cv.notify_all();
+    return false;
+}
+
+void detail::fifo_lock::unlock() {
+    bool waiters;
+    {
+        std::lock_guard lock{_mutex};
+        _held = false;
+        _owner = std::thread::id{};
+        waiters = !_queue.empty();
+    }
+    if (waiters)
+        _cv.notify_all();
+}
+
+bool detail::fifo_lock::held_by_this_thread() {
+    std::lock_guard lock{_mutex};
+    return _held && _owner == std::this_thread::get_id();
+}
+
+ImmediateTransaction::ImmediateTransaction(Database& db, SQLite::Database& sql) : _db{db} {
+    if (db._write_lock.held_by_this_thread())
+        throw SQLite::Exception{
+                "begin_immediate() would deadlock: this thread already holds the database's "
+                "write lock in another begin_immediate() transaction",
+                SQLITE_MISUSE};
+
+    const auto deadline = std::chrono::steady_clock::now() + db._busy_timeout;
+    if (!db._write_lock.lock_until(deadline))
+        throw SQLite::Exception{"database is locked", SQLITE_BUSY};
+
+    // The busy timeout bounds the whole call, so BEGIN's busy handler gets only what waiting for
+    // _write_lock left of it.  A timeout of 0 means the connection has no busy handler at all, and
+    // setting one of 0 would remove it, so what is left is never less than 1ms.
+    const int full = static_cast<int>(db._busy_timeout.count());
+    int left = full;
+    if (full > 0)
+        left = std::clamp(
+                static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(
+                                         deadline - std::chrono::steady_clock::now())
+                                         .count()),
+                1,
+                full);
+    auto* handle = sql.getHandle();
+    if (left != full)
+        sqlite3_busy_timeout(handle, left);
+    try {
+        _tx.emplace(sql, SQLite::TransactionBehavior::IMMEDIATE);
+    } catch (...) {
+        if (left != full)
+            sqlite3_busy_timeout(handle, full);
+        db._write_lock.unlock();
+        throw;
+    }
+    if (left != full)
+        sqlite3_busy_timeout(handle, full);
+}
+
+ImmediateTransaction::~ImmediateTransaction() {
+    if (_tx)
+        finish();
+}
+
+void ImmediateTransaction::finish() {
+    _tx.reset();
+    _db._write_lock.unlock();
+}
+
+void ImmediateTransaction::commit() {
+    if (!_tx)
+        throw SQLite::Exception{"Transaction already committed or rolled back."};
+    _tx->commit();
+    finish();
+}
+
+void ImmediateTransaction::rollback() {
+    if (!_tx)
+        throw SQLite::Exception{"Transaction already committed or rolled back."};
+    // SQLite::Transaction does not record a rollback, so finish() destroying it issues a second
+    // ROLLBACK, which fails harmlessly (and silently).  Keeping it around instead would leave that
+    // ROLLBACK for later, when this connection could be in some other transaction.
+    _tx->rollback();
+    finish();
+}
+
+ImmediateTransaction Connection::begin_immediate() {
+    return ImmediateTransaction{db, sql};
 }
 
 StatementWrapper Connection::prepared_st(std::string_view query) {
