@@ -21,6 +21,7 @@
 #include <mutex>
 #include <session/sqlite.hpp>
 #include <stdexcept>
+#include <utility>
 
 #include "conn.hpp"
 
@@ -422,6 +423,10 @@ Connection Database::get_or_make_conn(std::thread::id tid, int extra_open_flags)
     if (_post_open)
         _post_open(c);
 
+    // After post_open, so that it can still set the threshold with PRAGMA wal_autocheckpoint.
+    if (_wal)
+        conn->install_wal_hook();
+
     _conn_in_use.emplace_back(tid, std::move(conn));
 
     return c;
@@ -488,7 +493,9 @@ bool detail::fifo_lock::held_by_this_thread() {
     return _held && _owner == std::this_thread::get_id();
 }
 
-ImmediateTransaction::ImmediateTransaction(Database& db, SQLite::Database& sql) : _db{db} {
+ImmediateTransaction::ImmediateTransaction(Database& db, detail::conn& conn) :
+        _db{db}, _conn{conn} {
+    auto& sql = conn.sql;
     if (db._write_lock.held_by_this_thread())
         throw SQLite::Exception{
                 "begin_immediate() would deadlock: this thread already holds the database's "
@@ -525,6 +532,7 @@ ImmediateTransaction::ImmediateTransaction(Database& db, SQLite::Database& sql) 
     }
     if (left != full)
         sqlite3_busy_timeout(handle, full);
+    conn.in_immediate = true;
     _acquired = std::chrono::steady_clock::now();
 }
 
@@ -536,7 +544,13 @@ ImmediateTransaction::~ImmediateTransaction() {
 void ImmediateTransaction::finish() {
     _tx.reset();
     const auto released = std::chrono::steady_clock::now();
+    _conn.in_immediate = false;
+    const bool checkpoint = std::exchange(_conn.checkpoint_due, false);
     _db._write_lock.unlock();
+    // The checkpoint the COMMIT would have run (see detail::conn::install_wal_hook)
+    if (checkpoint)
+        sqlite3_wal_checkpoint_v2(
+                _conn.sql.getHandle(), nullptr, SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
     if (_db._write_lock_observer && released - _requested >= _db._write_lock_observer_threshold)
         _db._write_lock_observer(_acquired - _requested, released - _acquired);
 }
@@ -566,7 +580,7 @@ void ImmediateTransaction::rollback() {
 }
 
 ImmediateTransaction Connection::begin_immediate() {
-    return ImmediateTransaction{db, sql};
+    return ImmediateTransaction{db, *_conn};
 }
 
 StatementWrapper Connection::prepared_st(std::string_view query) {

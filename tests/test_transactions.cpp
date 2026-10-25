@@ -465,3 +465,48 @@ TEST_CASE("prepared_exec_immediate writes in a begin_immediate transaction", "[t
     holder.join();
     CHECK(c.prepared_get<int>("SELECT count(*) FROM foo") == 2);
 }
+
+TEST_CASE("the WAL is still checkpointed at the connection's threshold", "[transactions]") {
+    TempPath tmp;
+    auto wal_size = [&] { return std::filesystem::file_size(tmp.path.string() + "-wal"); };
+    const auto blob = std::string(3000, 'x');
+    constexpr int threshold = 50, writes = 300;
+
+    SECTION("after begin_immediate() transactions") {
+        Database db{tmp.path, post_open{[](Connection& c) {
+                        c.sql.exec("PRAGMA wal_autocheckpoint = " + std::to_string(threshold));
+                    }}};
+        auto c = db.conn();
+        c.sql.exec("CREATE TABLE foo (x BLOB)");
+        for (int i = 0; i < writes; i++) {
+            auto tx = c.begin_immediate();
+            c.prepared_exec("INSERT INTO foo VALUES (?)", blob);
+            tx.commit();
+        }
+        // A checkpointed WAL is reused from the start, so it never gets much past the threshold
+        CHECK(wal_size() < 2 * threshold * 4096);
+    }
+    SECTION("after writes made without begin_immediate()") {
+        Database db{tmp.path, post_open{[](Connection& c) {
+                        c.sql.exec("PRAGMA wal_autocheckpoint = " + std::to_string(threshold));
+                    }}};
+        auto c = db.conn();
+        c.sql.exec("CREATE TABLE foo (x BLOB)");
+        for (int i = 0; i < writes; i++)
+            c.prepared_exec("INSERT INTO foo VALUES (?)", blob);
+        CHECK(wal_size() < 2 * threshold * 4096);
+    }
+    SECTION("not at all with a threshold of 0") {
+        Database db{tmp.path, post_open{[](Connection& c) {
+                        c.sql.exec("PRAGMA wal_autocheckpoint = 0");
+                    }}};
+        auto c = db.conn();
+        c.sql.exec("CREATE TABLE foo (x BLOB)");
+        for (int i = 0; i < writes; i++) {
+            auto tx = c.begin_immediate();
+            c.prepared_exec("INSERT INTO foo VALUES (?)", blob);
+            tx.commit();
+        }
+        CHECK(wal_size() > writes * 3000);
+    }
+}

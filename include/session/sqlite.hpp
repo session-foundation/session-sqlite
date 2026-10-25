@@ -1123,12 +1123,13 @@ class IterableStatementWrapper : StatementWrapper {
 /// that throws leaves the transaction open, so both locks stay held until it is destroyed.
 class ImmediateTransaction {
     Database& _db;
+    detail::conn& _conn;
     // Engaged exactly while this holds the Database's _write_lock
     std::optional<SQLite::Transaction> _tx;
     std::chrono::steady_clock::time_point _requested, _acquired;
 
     friend class Connection;
-    ImmediateTransaction(Database& db, SQLite::Database& sql);
+    ImmediateTransaction(Database& db, detail::conn& conn);
 
     void finish();
 
@@ -1191,11 +1192,8 @@ class Connection {
     /// The lock keeps every other writer on the file waiting until the transaction ends, so what
     /// runs inside should be the writes and the reads that decide them.  Readers are not blocked.
     ///
-    /// That includes SQLite's automatic WAL checkpoint, which runs inside the COMMIT of whichever
-    /// transaction takes the WAL past its threshold, so every other begin_immediate() caller waits
-    /// for it.  A process with a steady flow of writes should turn it off (`PRAGMA
-    /// wal_autocheckpoint = 0` on each connection) and run `PRAGMA wal_checkpoint(PASSIVE)`
-    /// periodically from somewhere that is not holding up a writer.
+    /// Set `PRAGMA wal_autocheckpoint`, if at all, from `post_open`: set on a connection later, it
+    /// makes the automatic checkpoint run inside COMMIT, with every queued writer waiting for it.
     [[nodiscard]] ImmediateTransaction begin_immediate();
 
     /// Prepares a query, caching it, and returns a wrapper that automatically resets the
