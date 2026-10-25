@@ -362,3 +362,37 @@ TEST_CASE(
     tx2.commit();
     CHECK(c.prepared_get<int>("SELECT count(*) FROM foo") == 2);
 }
+
+TEST_CASE("prepared_exec_immediate writes in a begin_immediate transaction", "[transactions]") {
+    TempPath tmp;
+    Database db{tmp.path, busy_timeout{0ms}};
+    db.conn().sql.exec("CREATE TABLE foo (x INTEGER)");
+    auto c = db.conn();
+
+    CHECK(c.prepared_exec_immediate("INSERT INTO foo VALUES (?), (?)", 1, 2) == 2);
+    CHECK(c.prepared_get<int>("SELECT count(*) FROM foo") == 2);
+    CHECK(can_begin_immediate_elsewhere(db));
+
+    {
+        auto tx = c.begin_immediate();
+        CHECK(throws_misuse([&] { c.prepared_exec_immediate("INSERT INTO foo VALUES (3)"); }));
+    }
+
+    std::promise<void> holding, done;
+    std::thread holder{[&] {
+        auto c = db.conn();
+        auto tx = c.begin_immediate();
+        holding.set_value();
+        done.get_future().wait();
+    }};
+    holding.get_future().wait();
+    try {
+        c.prepared_exec_immediate("INSERT INTO foo VALUES (4)");
+        FAIL("prepared_exec_immediate wrote while another thread held the write lock");
+    } catch (const SQLite::Exception& e) {
+        CHECK(is_busy(e));
+    }
+    done.set_value();
+    holder.join();
+    CHECK(c.prepared_get<int>("SELECT count(*) FROM foo") == 2);
+}

@@ -1213,6 +1213,18 @@ class Connection {
         return exec_query(prepared_st(query), bind...);
     }
 
+    /// prepared_exec() in a begin_immediate() transaction of its own, for a write that is a single
+    /// statement, so that it waits for the write lock the way begin_immediate() does rather than in
+    /// the busy handler alone.  Returns the number of rows changed.  Inside a begin_immediate()
+    /// transaction use prepared_exec() instead: this would throw, as begin_immediate() does.
+    template <typename... T>
+    int prepared_exec_immediate(std::string_view query, const T&... bind) {
+        auto tx = begin_immediate();
+        int changes = prepared_exec(query, bind...);
+        tx.commit();
+        return changes;
+    }
+
     /// Prepares (with caching) a query that returns a single row (with optional bind
     /// parameters), executes it, and returns the value.  Throws if the query returns 0 or more
     /// than 1 rows.
