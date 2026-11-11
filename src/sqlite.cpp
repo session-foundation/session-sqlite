@@ -582,11 +582,12 @@ void ImmediateTransaction::rollback() {
     finish();
 }
 
-ImmediateTransaction Connection::begin_immediate(std::optional<std::chrono::milliseconds> timeout) {
+ImmediateTransaction Connection::begin_immediate(
+        std::optional<std::chrono::milliseconds> timeout) & {
     return ImmediateTransaction{db, *_conn, timeout};
 }
 
-StatementWrapper Connection::prepared_st(std::string_view query) {
+StatementWrapper Connection::prepared_st(std::string_view query) & {
     return _conn->prepared_st(query);
 }
 
